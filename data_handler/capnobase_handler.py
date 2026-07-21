@@ -102,6 +102,7 @@ class CAPNOBASE_Handler:
                     "end": end_time,
                     "PPG": ppg_signal[start_idx:end_idx].tolist(),
                     "HR": hr_values[end_time - 1] if end_time - 1 < len(hr_values) else None,
+                    "sampling_rate": self.sampling_rate
                 })
 
         return processed_data
