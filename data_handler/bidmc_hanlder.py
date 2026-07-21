@@ -1,4 +1,5 @@
 import pandas as pd
+import numpy as np
 
 class BIDMC_Handler:
     def __init__(self, data_path):
@@ -78,7 +79,7 @@ class BIDMC_Handler:
                     "start": start_time,
                     "end": end_time,
                     "PPG": ppg_signal[start_idx:end_idx].tolist(),
-                    "HR": hr_values[end_time - 1] if end_time - 1 < len(hr_values) else None,
+                    "HR": float(np.nanmean(hr_values[start_time:end_time])) if len(hr_values[start_time:end_time]) else None,
                     "sampling_rate": self.sampling_rate
                 })
 

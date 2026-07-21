@@ -1,5 +1,5 @@
 from pathlib import Path
-from utils.calculate_hr import calculate_hr_from_ecg
+import numpy as np
 import pandas as pd
 
 
@@ -8,6 +8,24 @@ class CAPNOBASE_Handler:
         self.data_path = Path(data_path)
         self.data = None
         self.sampling_rate = 300
+
+    def _normalize_numeric_series(self, values):
+        if isinstance(values, pd.Series):
+            values = values.tolist()
+
+        if hasattr(values, "tolist") and not isinstance(values, list):
+            values = values.tolist()
+
+        if isinstance(values, (list, tuple, np.ndarray)):
+            values = list(values)
+            if len(values) == 1 and isinstance(values[0], str):
+                values = values[0]
+
+        if isinstance(values, str):
+            values = values.replace(",", " ").strip()
+            return np.fromstring(values, sep=" ")
+
+        return np.asarray(values, dtype=float)
 
     # def _get_sampling_rate(self, param_df):
     #     for column in ("samplingrate_pleth", "samplingrate_ecg", "samplingrate_co2"):
@@ -79,14 +97,12 @@ class CAPNOBASE_Handler:
         for subject_data in self.data:
             subject_id = subject_data["id"]
             signal_df = subject_data["signal"]
-            labels_df = subject_data["labels"]
-            param_df = subject_data["param"]
+            # labels_df = subject_data["labels"]
+            # param_df = subject_data["param"]
+            reference_df = subject_data["reference"]
             
             ppg_signal = signal_df['pleth_y'].values
-            ecg_peaks = labels_df['ecg_peak_x'].values
-
-            # sampling_rate = self._get_sampling_rate(param_df)
-            hr_values = calculate_hr_from_ecg(ecg_peaks, self.sampling_rate)
+            hr_values = self._normalize_numeric_series(reference_df['hr_ecg_y'])
             
             total_seconds = len(ppg_signal) // self.sampling_rate
             
@@ -101,7 +117,7 @@ class CAPNOBASE_Handler:
                     "start": start_time,
                     "end": end_time,
                     "PPG": ppg_signal[start_idx:end_idx].tolist(),
-                    "HR": hr_values[end_time - 1] if end_time - 1 < len(hr_values) else None,
+                    "HR": float(np.nanmean(hr_values[start_time:end_time])) if len(hr_values[start_time:end_time]) else None,
                     "sampling_rate": self.sampling_rate
                 })
 
