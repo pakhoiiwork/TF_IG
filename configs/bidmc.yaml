@@ -1,0 +1,22 @@
+dataset_name: bidmc
+data_path: datasets/bidmc-ppg-and-respiration-dataset-1.0.0/bidmc_csv
+
+input_dim: 1000
+hidden_dim: 2046
+output_dim: 1
+
+batch_size: 80
+epochs: 90
+
+lr: 0.001
+lr_patience: 8
+lr_scheduler: plateau
+
+weight_decay: 0.0001
+
+window_size: 8
+window_shift: 2
+
+val_split: 0.2
+seed: 42
+num_workers: 4
