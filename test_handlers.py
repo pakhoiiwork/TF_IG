@@ -45,7 +45,14 @@ def main():
     print("CapnoBase summary:", capno_summary)
     print("Same key order:", same_keys)
     print("Same key set:", same_key_set)
-
+    
+    # print(bidmc_processed[0])
+    # print()
+    # print(bidmc_processed[1])
+    # print("===" * 20)
+    # print(capno_processed[0])
+    # print()
+    # print(capno_processed[1])
 
 if __name__ == "__main__":
     main()

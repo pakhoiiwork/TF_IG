@@ -7,12 +7,13 @@ class CAPNOBASE_Handler:
     def __init__(self, data_path):
         self.data_path = Path(data_path)
         self.data = None
+        self.sampling_rate = 300
 
-    def _get_sampling_rate(self, param_df):
-        for column in ("samplingrate_pleth", "samplingrate_ecg", "samplingrate_co2"):
-            if column in param_df.columns:
-                return int(param_df[column].iloc[0])
-        raise KeyError("No sampling rate column found in CapnoBase param data")
+    # def _get_sampling_rate(self, param_df):
+    #     for column in ("samplingrate_pleth", "samplingrate_ecg", "samplingrate_co2"):
+    #         if column in param_df.columns:
+    #             return int(param_df[column].iloc[0])
+    #     raise KeyError("No sampling rate column found in CapnoBase param data")
 
     def get_raw_data_from_csv(self):
         files = ["labels", "meta", "param", "reference", "signal", "SFresults"]
@@ -48,20 +49,20 @@ class CAPNOBASE_Handler:
         return data_list
     
     
-    def process_data(self):
+    def process_data(self, window_size=8, window_shift=2):
         """ Format of returned data:
             [
                 {
                     "id": "capnobase_01",
                     "start": 0,
-                    "end": 1,
+                    "end": 8,
                     "PPG": [0.43597, 0.43206, 0.42815, "...(300 samples)..."],
                     "HR": 94
                 },
                 {
                     "id": "capnobase_01",
-                    "start": 1,
-                    "end": 2,
+                    "start": 2,
+                    "end": 10,
                     "PPG": [0.58162, 0.58749, 0.59000, "...(300 samples)..."],
                     "HR": 94
                 }
@@ -84,28 +85,24 @@ class CAPNOBASE_Handler:
             ppg_signal = signal_df['pleth_y'].values
             ecg_peaks = labels_df['ecg_peak_x'].values
 
-            sampling_rate = self._get_sampling_rate(param_df)
-            hr_values = calculate_hr_from_ecg(ecg_peaks, sampling_rate)
-
-            num_segments = len(ppg_signal) // sampling_rate
-            # print(f"Processing subject {subject_id}: {num_segments} segments.")
+            # sampling_rate = self._get_sampling_rate(param_df)
+            hr_values = calculate_hr_from_ecg(ecg_peaks, self.sampling_rate)
             
-            for i in range(num_segments):
-                start_idx = i * sampling_rate
-                end_idx = start_idx + sampling_rate
+            total_seconds = len(ppg_signal) // self.sampling_rate
+            
+            for start_time in range(0, total_seconds - window_size + 1, window_shift):
+                end_time = start_time + window_size
 
-                segment_ppg = ppg_signal[start_idx:end_idx]
-                segment_hr = hr_values[i] if i < len(hr_values) else None
+                start_idx = start_time * self.sampling_rate
+                end_idx = end_time * self.sampling_rate
 
-                segment_data = {
+                processed_data.append({
                     "id": subject_id,
-                    "start": i,
-                    "end": i + 1,
-                    "PPG": segment_ppg.tolist(),
-                    "HR": segment_hr
-                }
-                
-                processed_data.append(segment_data)
+                    "start": start_time,
+                    "end": end_time,
+                    "PPG": ppg_signal[start_idx:end_idx].tolist(),
+                    "HR": hr_values[end_time - 1] if end_time - 1 < len(hr_values) else None,
+                })
 
         return processed_data
             
