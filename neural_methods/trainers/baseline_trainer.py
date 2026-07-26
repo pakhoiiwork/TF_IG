@@ -14,10 +14,12 @@ from data_handler.capnobase_handler import CAPNOBASE_Handler
 
 
 def set_seed(seed: int) -> None:
-    """Seed every RNG involved in the pipeline (python/numpy/torch/cuda) for reproducibility.
+    """Initialize all random number generators with the same seed.
 
-    `config.seed` previously only fed the random_split generator; DataLoader shuffling,
-    weight init, and dropout were still non-deterministic run to run.
+        Seeds Python, NumPy, PyTorch, and CUDA (if available) to improve
+        reproducibility. This makes random operations, such as dataset shuffling,
+        weight initialization, dropout, and random sampling, deterministic across
+        runs when possible.
     """
     random.seed(seed)
     np.random.seed(seed)
@@ -65,7 +67,9 @@ class BaselineTrainer:
 
         self.model = BaselineModel(
             input_dim=config.input_dim,
-            hidden_dim=config.hidden_dim,
+            hidden_dim1=config.hidden_dim1,
+            hidden_dim2=config.hidden_dim2,
+            hidden_dim3=config.hidden_dim3,
             output_dim=config.output_dim,
         )
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -292,16 +296,18 @@ class BaselineTrainer:
                     f"          | "
                     f"Val   -> MSE: {val_metrics['mse']:.4f} | RMSE: {val_metrics['rmse']:.4f} | MAE: {val_metrics['mae']:.4f}"
                 )
+                
+                only_save_best_model = getattr(self.config, "only_save_best_model", False)
+                if not only_save_best_model:
+                    # 1 checkpoint per epoch
+                    epoch_ckpt_path = os.path.join(self.checkpoint_dir, f"epoch_{epoch:03d}.pth")
+                    self._save_checkpoint(epoch, train_metrics, val_metrics, epoch_ckpt_path)
 
-                # --- 1 checkpoint per epoch, as requested ---
-                epoch_ckpt_path = os.path.join(self.checkpoint_dir, f"epoch_{epoch:03d}.pth")
-                self._save_checkpoint(epoch, train_metrics, val_metrics, epoch_ckpt_path)
+                    # rolling pointer to the latest epoch, for easy resuming
+                    last_ckpt_path = os.path.join(self.checkpoint_dir, "last.pth")
+                    self._save_checkpoint(epoch, train_metrics, val_metrics, last_ckpt_path)
 
-                # --- rolling pointer to the latest epoch, for easy resuming ---
-                last_ckpt_path = os.path.join(self.checkpoint_dir, "last.pth")
-                self._save_checkpoint(epoch, train_metrics, val_metrics, last_ckpt_path)
-
-                # --- best model tracked separately by val RMSE ---
+                # best model tracked separately by val RMSE
                 if val_metrics["rmse"] < self.best_val_rmse:
                     self.best_val_rmse = val_metrics["rmse"]
                     epochs_without_improvement = 0
