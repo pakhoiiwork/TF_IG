@@ -1,0 +1,29 @@
+dataset_name: capnobase
+data_path: datasets/CapnoBase/data/csv
+
+input_dim: 2400
+hidden_dim1: 1024
+hidden_dim2: 256
+hidden_dim3: 64
+output_dim: 1
+
+batch_size: 80
+epochs: 150
+
+lr: 0.001
+lr_patience: 8
+lr_scheduler: plateau
+
+weight_decay: 0.0001
+
+window_size: 8
+window_shift: 2
+
+val_split: 0.2
+seed: 42
+num_workers: 4
+
+only_save_best_model: true
+mode: "only_evaluate"
+
+model_path: "pretrained_models/baseline_capnobase/best_model.pth"

@@ -16,10 +16,10 @@ from data_handler.capnobase_handler import CAPNOBASE_Handler
 def set_seed(seed: int) -> None:
     """Initialize all random number generators with the same seed.
 
-        Seeds Python, NumPy, PyTorch, and CUDA (if available) to improve
-        reproducibility. This makes random operations, such as dataset shuffling,
-        weight initialization, dropout, and random sampling, deterministic across
-        runs when possible.
+    Seeds Python, NumPy, PyTorch, and CUDA (if available) to improve
+    reproducibility. This makes random operations, such as dataset shuffling,
+    weight initialization, dropout, and random sampling, deterministic across
+    runs when possible.
     """
     random.seed(seed)
     np.random.seed(seed)
@@ -60,8 +60,19 @@ class PPGWindowDataset(Dataset):
 
 
 class BaselineTrainer:
+    """
+    `config.mode` controls how much of the pipeline gets built and run,
+    mirroring the `TOOLBOX_MODE` pattern used in RhythmMambaTrainer:
+
+      - "train_and_evaluate": build optimizer/scheduler/checkpointing/logging,
+        run the full training loop, then evaluate the best checkpoint produced.
+      - "only_evaluate": skip all training machinery entirely — just load the
+        pretrained weights from `config.model_path` and evaluate.
+    """
+
     def __init__(self, config):
         self.config = config
+        self.mode = getattr(config, "mode", "train_and_evaluate")
 
         set_seed(getattr(config, "seed", 42))
 
@@ -76,35 +87,56 @@ class BaselineTrainer:
         self.model.to(self.device)
 
         self.criterion = nn.MSELoss()
-        self.optimizer = torch.optim.Adam(
-            self.model.parameters(),
-            lr=config.lr,
-            weight_decay=getattr(config, "weight_decay", 0.0),
-        )
-
-        # Optional LR scheduler. Off by default (backward compatible with old configs);
-        # enable by setting config.lr_scheduler = "plateau"
-        self.scheduler = None
-        if getattr(config, "lr_scheduler", None) == "plateau":
-            self.scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-                self.optimizer,
-                mode="min",
-                factor=getattr(config, "lr_factor", 0.5),
-                patience=getattr(config, "lr_patience", 5),
-            )
-
-        self.grad_clip_norm = getattr(config, "grad_clip_norm", None)
-        self.early_stop_patience = getattr(config, "early_stop_patience", None)
 
         self.train_loader, self.val_loader = self._build_dataloaders()
 
         self.model_dir = os.path.join("pretrained_models", f"baseline_{config.dataset_name}")
-        self.checkpoint_dir = os.path.join(self.model_dir, "checkpoints")
-        os.makedirs(self.checkpoint_dir, exist_ok=True)
 
-        self.writer = SummaryWriter(log_dir=os.path.join(self.model_dir, "logs"))
-        self.best_val_rmse = float("inf")
-        self.history_path = os.path.join(self.model_dir, "history.json")
+        if self.mode == "train_and_evaluate":
+            self.optimizer = torch.optim.Adam(
+                self.model.parameters(),
+                lr=config.lr,
+                weight_decay=getattr(config, "weight_decay", 0.0),
+            )
+
+            # Optional LR scheduler. Off by default (backward compatible with old configs);
+            # enable by setting config.lr_scheduler = "plateau"
+            self.scheduler = None
+            if getattr(config, "lr_scheduler", None) == "plateau":
+                self.scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+                    self.optimizer,
+                    mode="min",
+                    factor=getattr(config, "lr_factor", 0.5),
+                    patience=getattr(config, "lr_patience", 5),
+                )
+
+            self.grad_clip_norm = getattr(config, "grad_clip_norm", None)
+            self.early_stop_patience = getattr(config, "early_stop_patience", None)
+
+            self.checkpoint_dir = os.path.join(self.model_dir, "checkpoints")
+            os.makedirs(self.checkpoint_dir, exist_ok=True)
+
+            self.writer = SummaryWriter(log_dir=os.path.join(self.model_dir, "logs"))
+            self.best_val_rmse = float("inf")
+            self.history_path = os.path.join(self.model_dir, "history.json")
+
+        elif self.mode == "only_evaluate":
+            # Inference-only: no optimizer/scheduler/writer/checkpoint dir needed.
+            # Just load the pretrained weights so `evaluate()` has something to score.
+            model_path = getattr(config, "model_path", "")
+            if not model_path or not os.path.exists(model_path):
+                raise ValueError(
+                    "config.mode == 'only_evaluate' requires config.model_path to point "
+                    f"to an existing checkpoint (got: {model_path!r})."
+                )
+            self._load_model_weights(model_path)
+            print(f"[inference] Loaded pretrained weights from {model_path}")
+
+        else:
+            raise ValueError(
+                f"Unsupported config.mode: {self.mode!r}. "
+                "Expected 'train_and_evaluate' or 'only_evaluate'."
+            )
 
     def _get_handler(self):
         dataset_name = self.config.dataset_name.lower()
@@ -252,14 +284,30 @@ class BaselineTrainer:
             "val_metrics": val_metrics,
         }, path)
 
+    def _load_model_weights(self, path):
+        """Load only the model weights from a checkpoint (no optimizer state).
+
+        Used for inference-only evaluation, where there's no optimizer to
+        restore. Handles both full checkpoint dicts saved by `_save_checkpoint`
+        (which have a "model_state_dict" key) and raw state_dicts saved by
+        `save_model`.
+        """
+        checkpoint = torch.load(path, map_location=self.device)
+        state_dict = checkpoint.get("model_state_dict", checkpoint) if isinstance(checkpoint, dict) else checkpoint
+        self.model.load_state_dict(state_dict)
+
     def load_checkpoint(self, path):
-        """Resume training/inference from a checkpoint saved by `_save_checkpoint`."""
+        """Resume training from a full checkpoint saved by `_save_checkpoint`
+        (restores both model and optimizer state)."""
         checkpoint = torch.load(path, map_location=self.device)
         self.model.load_state_dict(checkpoint["model_state_dict"])
         self.optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
         return checkpoint["epoch"]
 
     def train(self):
+        if self.mode != "train_and_evaluate":
+            raise RuntimeError("train() requires config.mode == 'train_and_evaluate'")
+
         history = []
         epochs_without_improvement = 0
 
@@ -296,7 +344,7 @@ class BaselineTrainer:
                     f"          | "
                     f"Val   -> MSE: {val_metrics['mse']:.4f} | RMSE: {val_metrics['rmse']:.4f} | MAE: {val_metrics['mae']:.4f}"
                 )
-                
+
                 only_save_best_model = getattr(self.config, "only_save_best_model", False)
                 if not only_save_best_model:
                     # 1 checkpoint per epoch
@@ -332,6 +380,49 @@ class BaselineTrainer:
             self.writer.close()
 
         return history
+
+    def evaluate(self, loader=None):
+        """Standalone evaluation/test step, extracted out of the training loop
+        (this is the piece that plays the role of `RhythmMambaTrainer.test()`).
+
+        Which checkpoint gets scored depends on `config.mode`:
+          - "only_evaluate": weights were already loaded from `config.model_path`
+            in `__init__`, so this just scores whatever is currently in
+            `self.model` — no training machinery is touched at all.
+          - "train_and_evaluate": reloads the best checkpoint produced by
+            `train()` (tracked by val RMSE) before scoring it, so the reported
+            numbers reflect the best epoch rather than wherever training
+            happened to stop.
+        """
+        loader = self.val_loader if loader is None else loader
+
+        if self.mode == "train_and_evaluate":
+            best_ckpt_path = os.path.join(self.model_dir, "best_model.pth")
+            if os.path.exists(best_ckpt_path):
+                self._load_model_weights(best_ckpt_path)
+                print(f"[eval] Loaded best checkpoint from {best_ckpt_path}")
+
+        metrics = self._run_epoch(loader, training=False)
+        print(
+            f"Eval -> MSE: {metrics['mse']:.4f} | RMSE: {metrics['rmse']:.4f} | MAE: {metrics['mae']:.4f}"
+        )
+        return metrics
+
+    def run(self):
+        """Single entry point: dispatches on `config.mode`, the same way an
+        external `main.py` dispatches on `TOOLBOX_MODE` for RhythmMamba
+        ("train_and_test" -> train() then test(); "only_test" -> test() only).
+
+        Usage:
+            trainer = BaselineTrainer(config)
+            trainer.run()
+        """
+        if self.mode == "train_and_evaluate":
+            self.train()
+            print("=" * 65)
+            return self.evaluate()
+        else:  # only_evaluate
+            return self.evaluate()
 
     def save_model(self, path):
         torch.save(self.model.state_dict(), path)

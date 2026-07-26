@@ -40,7 +40,7 @@ def main():
 
     config = load_config(config_path)
     trainer = BaselineTrainer(config)
-    trainer.train()
+    trainer.run()
     # trainer.save_model(save_path)
 
 
