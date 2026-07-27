@@ -12,6 +12,8 @@ from neural_methods.models.baseline import BaselineModel
 from data_handler.bidmc_hanlder import BIDMC_Handler
 from data_handler.capnobase_handler import CAPNOBASE_Handler
 
+from utils.plot_prediction import plot_prediction
+
 
 def set_seed(seed: int) -> None:
     """Initialize all random number generators with the same seed.
@@ -233,12 +235,14 @@ class BaselineTrainer:
 
         return train_loader, val_loader
 
-    def _run_epoch(self, loader, training=True):
+    def _run_epoch(self, loader, training=True, return_predictions=False):
         self.model.train() if training else self.model.eval()
 
         total_mse = 0.0
         total_mae = 0.0
         total_count = 0
+
+        pred_true_pairs = []
 
         for ppg, hr in loader:
             ppg = ppg.to(self.device)
@@ -260,6 +264,8 @@ class BaselineTrainer:
                     if self.grad_clip_norm:
                         nn.utils.clip_grad_norm_(self.model.parameters(), self.grad_clip_norm)
                     self.optimizer.step()
+                elif return_predictions:
+                    pred_true_pairs.append((predictions.detach().cpu().numpy(), hr.detach().cpu().numpy()))
 
             batch_size = ppg.size(0)
             total_mse += mse_loss.item() * batch_size
@@ -273,8 +279,15 @@ class BaselineTrainer:
         avg_mae = total_mae / total_count
         avg_rmse = float(np.sqrt(avg_mse))
 
-        return {"mse": avg_mse, "mae": avg_mae, "rmse": avg_rmse}
+        metrics = {"mse": avg_mse, "mae": avg_mae, "rmse": avg_rmse}
 
+        if return_predictions and pred_true_pairs:
+            all_predictions = np.concatenate([p for p, t in pred_true_pairs])
+            all_true_values = np.concatenate([t for p, t in pred_true_pairs])
+            return metrics, all_predictions, all_true_values
+
+        return metrics
+    
     def _save_checkpoint(self, epoch, train_metrics, val_metrics, path):
         torch.save({
             "epoch": epoch,
@@ -381,19 +394,7 @@ class BaselineTrainer:
 
         return history
 
-    def evaluate(self, loader=None):
-        """Standalone evaluation/test step, extracted out of the training loop
-        (this is the piece that plays the role of `RhythmMambaTrainer.test()`).
-
-        Which checkpoint gets scored depends on `config.mode`:
-          - "only_evaluate": weights were already loaded from `config.model_path`
-            in `__init__`, so this just scores whatever is currently in
-            `self.model` — no training machinery is touched at all.
-          - "train_and_evaluate": reloads the best checkpoint produced by
-            `train()` (tracked by val RMSE) before scoring it, so the reported
-            numbers reflect the best epoch rather than wherever training
-            happened to stop.
-        """
+    def evaluate(self, loader=None, save_plot=True):
         loader = self.val_loader if loader is None else loader
 
         if self.mode == "train_and_evaluate":
@@ -402,10 +403,20 @@ class BaselineTrainer:
                 self._load_model_weights(best_ckpt_path)
                 print(f"[eval] Loaded best checkpoint from {best_ckpt_path}")
 
-        metrics = self._run_epoch(loader, training=False)
+        metrics, predictions, true_values = self._run_epoch(
+            loader, training=False, return_predictions=True
+        )
+
         print(
             f"Eval -> MSE: {metrics['mse']:.4f} | RMSE: {metrics['rmse']:.4f} | MAE: {metrics['mae']:.4f}"
         )
+
+        if save_plot:
+            os.makedirs(self.model_dir, exist_ok=True)
+            plot_path = os.path.join(self.model_dir, "eval_predictions_plot.png")
+            plot_prediction(predictions, true_values, save_path=plot_path)
+            print(f"[eval] Prediction plot saved to {plot_path}")
+
         return metrics
 
     def run(self):
