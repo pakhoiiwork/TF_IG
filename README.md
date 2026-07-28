@@ -1,5 +1,5 @@
 # BL-PPG-Artifact-Removal
-
+![alt text](images/image.png)
 ## Environment Setup
 
 Follow these steps:
