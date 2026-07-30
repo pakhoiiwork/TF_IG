@@ -6,6 +6,11 @@ hidden_dim1: 512
 hidden_dim2: 256
 hidden_dim3: 64
 output_dim: 1
+patch_size: 25
+d_model: 128
+num_heads: 2
+ffn_dim: 256
+num_layers: 2
 
 batch_size: 80
 epochs: 150

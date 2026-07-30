@@ -10,7 +10,7 @@ ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT))
 
 from neural_methods.trainers.baseline_trainer import BaselineTrainer
-
+from neural_methods.trainers.baseline_transformer_trainer import BaselineTransformerTrainer
 
 def to_namespace(value):
     if isinstance(value, dict):
@@ -27,6 +27,7 @@ def load_config(config_path):
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Train the baseline PPG artifact-removal model")
+    parser.add_argument("--model", required=True, help="Model type to train")
     parser.add_argument("--config", required=True, help="Path to a YAML config file")
     return parser.parse_args()
 
@@ -39,7 +40,12 @@ def main():
         config_path = ROOT / config_path
 
     config = load_config(config_path)
-    trainer = BaselineTrainer(config)
+    
+    if args.model == "base_trans":
+        trainer = BaselineTransformerTrainer(config)
+    elif args.model == "base":
+        trainer = BaselineTrainer(config)
+    
     trainer.run()
     # trainer.save_model(save_path)
 
