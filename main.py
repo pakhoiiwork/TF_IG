@@ -11,6 +11,7 @@ sys.path.insert(0, str(ROOT))
 
 from neural_methods.trainers.baseline_trainer import BaselineTrainer
 from neural_methods.trainers.baseline_transformer_trainer import BaselineTransformerTrainer
+from neural_methods.trainers.baseline_2branch_trainer import Baseline2BranchTrainer
 
 def to_namespace(value):
     if isinstance(value, dict):
@@ -45,7 +46,11 @@ def main():
         trainer = BaselineTransformerTrainer(config)
     elif args.model == "base":
         trainer = BaselineTrainer(config)
-    
+    elif args.model == "base_2branch":
+        trainer = Baseline2BranchTrainer(config)
+    else:
+        raise ValueError(f"Unknown model type: {args.model}")
+        
     trainer.run()
     # trainer.save_model(save_path)
 
