@@ -2,15 +2,17 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+from utils.bandpass_filter import bandpass_filter
 
 
 class CAPNOBASE_Handler:
     """Loader / windower for the CapnoBase PPG dataset."""
 
-    def __init__(self, data_path):
+    def __init__(self, data_path, eps=1e-8):
         self.data_path = Path(data_path)
         self.data = None
         self.sampling_rate = 300  # Fallback sampling rate
+        self.eps = eps
 
     def _normalize_numeric_series(self, values):
         if isinstance(values, pd.Series):
@@ -85,12 +87,17 @@ class CAPNOBASE_Handler:
                 end_idx = end_time * sampling_rate
 
                 win_hr = hr_values[(hr_time >= start_time) & (hr_time < end_time)] if hr_time is not None else hr_values[start_time:end_time]
+                win_ppg = ppg_signal[start_idx:end_idx]
+                win_ppg = bandpass_filter(win_ppg, lowcut=0.5, highcut=5.0, fs=self.sampling_rate, order=4)
+                win_ppg = (
+                    win_ppg - np.mean(win_ppg)
+                ) / (np.std(win_ppg) + self.eps)  # Normalize PPG window
 
                 processed_data.append({
                     "id": subject_id,
                     "start": start_time,
                     "end": end_time,
-                    "PPG": ppg_signal[start_idx:end_idx].tolist(),
+                    "PPG": win_ppg.tolist(),
                     "HR": float(np.nanmean(win_hr)) if len(win_hr) > 0 else None,
                     "sampling_rate": sampling_rate,
                 })
