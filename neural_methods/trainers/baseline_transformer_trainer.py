@@ -346,11 +346,11 @@ class BaselineTransformerTrainer:
                 })
 
                 self.writer.add_scalar("Loss/Train_MSE", train_metrics["mse"], epoch)
-                self.writer.add_scalar("Loss/Train_MAE", train_metrics["mae"], epoch)
-                self.writer.add_scalar("Loss/Train_RMSE", train_metrics["rmse"], epoch)
+                # self.writer.add_scalar("Loss/Train_MAE", train_metrics["mae"], epoch)
+                # self.writer.add_scalar("Loss/Train_RMSE", train_metrics["rmse"], epoch)
                 self.writer.add_scalar("Loss/Val_MSE", val_metrics["mse"], epoch)
-                self.writer.add_scalar("Loss/Val_MAE", val_metrics["mae"], epoch)
-                self.writer.add_scalar("Loss/Val_RMSE", val_metrics["rmse"], epoch)
+                # self.writer.add_scalar("Loss/Val_MAE", val_metrics["mae"], epoch)
+                # self.writer.add_scalar("Loss/Val_RMSE", val_metrics["rmse"], epoch)
                 self.writer.add_scalar("LR", self.optimizer.param_groups[0]["lr"], epoch)
 
                 print(

@@ -38,9 +38,10 @@ class TimeDomainBranch(nn.Module):
 
 
 class FrequencyDomainBranch(nn.Module):
-    def __init__(self, in_channels=1, out_channels=64, sampling_rate=125):
+    def __init__(self, sampling_rate, in_channels=1, out_channels=64):
         super().__init__()
-        self.win_length = int(sampling_rate * 2)  # 2 seconds window
+        self.sampling_rate = sampling_rate
+        self.win_length = int(sampling_rate * 8)  # 8 seconds window
         self.hop_length = int(sampling_rate * 1)  # 1 second hop
         self.n_fft = 2 ** math.ceil(math.log2(self.win_length))  # FFT size
 
@@ -54,6 +55,8 @@ class FrequencyDomainBranch(nn.Module):
             nn.BatchNorm2d(out_channels),
             nn.ReLU(inplace=True)
         )
+        
+        self.freq_attention_pooling = FrequencyAttentionPooling(out_channels)
 
     def forward(self, x):
         # x : (B, D)
@@ -65,6 +68,11 @@ class FrequencyDomainBranch(nn.Module):
             window=self.window,
             return_complex=True
         )
+
+        # Mask spectrogram between 0.5 Hz and 5 Hz
+        freqs = torch.fft.rfftfreq(self.n_fft, d=1/self.sampling_rate).to(spec.device)
+        mask = (freqs >= 0.5) & (freqs <= 5.0)
+        spec = spec[:, mask, :]      # (B, F_selected, T)
         
         # (B, F, T)
         spec = torch.abs(spec)
@@ -74,9 +82,38 @@ class FrequencyDomainBranch(nn.Module):
         out = self.stem(spec)
         
         # Global Average Pooling over frequency and time dimensions
-        out = out.mean(dim=[2, 3])  # (B, out_channels)
+        out = out.mean(dim=2)  # (B, out_channels, T)
+        out, _ = self.freq_attention_pooling(out)  # (B, out_channels)
         
         return out
+    
+    
+class FrequencyAttentionPooling(nn.Module):
+    def __init__(self, channels, hidden_channels=32):
+        super().__init__()
+
+        self.attention = nn.Sequential(
+            nn.Conv1d(channels, hidden_channels, kernel_size=1),
+            nn.ReLU(inplace=True),
+            nn.Conv1d(hidden_channels, 1, kernel_size=1),
+        )
+
+    def forward(self, x):
+        """
+        x: (B, C, F)
+        returns:
+            pooled: (B, C)
+            weights: (B, F)
+        """
+        logits = self.attention(x).squeeze(1)
+        weights = torch.softmax(logits, dim=-1)
+
+        pooled = torch.sum(
+            x * weights.unsqueeze(1),
+            dim=-1,
+        )
+
+        return pooled, weights
     
     
 class FusionStem(nn.Module):
@@ -86,7 +123,8 @@ class FusionStem(nn.Module):
         self.stem = nn.Sequential(
             nn.Linear(in_channels, out_channels),
             nn.BatchNorm1d(out_channels),
-            nn.ReLU(inplace=True)
+            nn.ReLU(inplace=True),
+            nn.Dropout(p=0.2)
         )
     
     def forward(self, x):
@@ -118,6 +156,10 @@ class Baseline2Branch(nn.Module):
         
         self.fusion_stem = FusionStem(in_channels=2*out_channels, out_channels=out_channels)
         self.regression_head = RegressionHead(in_channels=out_channels, out_channels=1)
+        
+        self.alpha = nn.Parameter(torch.tensor(0.6))
+        self.beta = nn.Parameter(torch.tensor(0.2))
+        self.gamma = nn.Parameter(torch.tensor(0.2))
     
     def forward(self, x):
         time_features = self.time_branch(x)  # (B, out_channels)
@@ -129,7 +171,15 @@ class Baseline2Branch(nn.Module):
         # Fusion stem
         fused_output = self.fusion_stem(fused_features)  # (B, out_channels)
         
-        # Regression head
-        output = self.regression_head(fused_output)  # (B, 1)
+        # Regression heads
+        fused_head = self.regression_head(fused_output)  # (B, 1)
+        time_head = self.regression_head(time_features)   # (B, 1)
+        freq_head = self.regression_head(freq_features)   # (B, 1)
         
-        return output
+        output = self.alpha * fused_head + self.beta * time_head + self.gamma * freq_head
+        
+        output = output.squeeze(-1)  # (B,)
+        time_head = time_head.squeeze(-1)  # (B,)
+        freq_head = freq_head.squeeze(-1)  # (B,)
+        
+        return output, time_head, freq_head

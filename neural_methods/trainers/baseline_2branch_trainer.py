@@ -9,6 +9,7 @@ from torch.utils.data import DataLoader, Dataset
 from torch.utils.tensorboard import SummaryWriter
 
 from neural_methods.models.baseline_2branch import Baseline2Branch
+from neural_methods.loss.hrauxcon import HRAuxConLoss
 from data_handler.bidmc_hanlder import BIDMC_Handler
 from data_handler.capnobase_handler import CAPNOBASE_Handler
 
@@ -84,7 +85,7 @@ class Baseline2BranchTrainer:
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.model.to(self.device)
 
-        self.criterion = nn.MSELoss()
+        self.criterion = HRAuxConLoss()
         
         self.model_dir = os.path.join("pretrained_models", f"baseline_2branch_{config.dataset_name}")
 
@@ -233,6 +234,7 @@ class Baseline2BranchTrainer:
     def _run_epoch(self, loader, training=True, return_predictions=False):
         self.model.train() if training else self.model.eval()
 
+        total_loss_sum = 0.0
         total_mse = 0.0
         total_mae = 0.0
         total_count = 0
@@ -247,15 +249,15 @@ class Baseline2BranchTrainer:
                 self.optimizer.zero_grad()
 
             with torch.set_grad_enabled(training):
-                predictions = self.model(ppg)
+                predictions, time_hr, freq_hr = self.model(ppg)
                 if predictions.dim() > 1:
                     predictions = predictions.squeeze(-1)
 
-                mse_loss = self.criterion(predictions, hr)
+                total_loss, losses = self.criterion(predictions, time_hr, freq_hr, hr)
                 mae_loss = torch.mean(torch.abs(predictions - hr))
 
                 if training:
-                    mse_loss.backward()
+                    total_loss.backward()
                     if self.grad_clip_norm:
                         nn.utils.clip_grad_norm_(self.model.parameters(), self.grad_clip_norm)
                     self.optimizer.step()
@@ -263,18 +265,25 @@ class Baseline2BranchTrainer:
                     pred_true_pairs.append((predictions.detach().cpu().numpy(), hr.detach().cpu().numpy()))
 
             batch_size = ppg.size(0)
-            total_mse += mse_loss.item() * batch_size
+            total_loss_sum += total_loss.item() * batch_size
+            total_mse += losses["main"].item() * batch_size
             total_mae += mae_loss.item() * batch_size
             total_count += batch_size
 
         if total_count == 0:
             raise RuntimeError("Dataloader produced zero samples for this epoch")
 
+        avg_total_loss = total_loss_sum / total_count
         avg_mse = total_mse / total_count
         avg_mae = total_mae / total_count
         avg_rmse = float(np.sqrt(avg_mse))
 
-        metrics = {"mse": avg_mse, "mae": avg_mae, "rmse": avg_rmse}
+        metrics = {
+            "loss": avg_total_loss,
+            "mse": avg_mse,
+            "mae": avg_mae,
+            "rmse": avg_rmse,
+        }
 
         if return_predictions and pred_true_pairs:
             all_predictions = np.concatenate([p for p, t in pred_true_pairs])
@@ -329,6 +338,8 @@ class Baseline2BranchTrainer:
 
                 history.append({
                     "epoch": epoch,
+                    "train_loss": train_metrics["loss"],
+                    "val_loss": val_metrics["loss"],
                     "train_mse": train_metrics["mse"],
                     "train_mae": train_metrics["mae"],
                     "train_rmse": train_metrics["rmse"],
@@ -338,21 +349,30 @@ class Baseline2BranchTrainer:
                     "lr": self.optimizer.param_groups[0]["lr"],
                 })
 
-                self.writer.add_scalar("Loss/Train_MSE", train_metrics["mse"], epoch)
-                self.writer.add_scalar("Loss/Train_MAE", train_metrics["mae"], epoch)
-                self.writer.add_scalar("Loss/Train_RMSE", train_metrics["rmse"], epoch)
-                self.writer.add_scalar("Loss/Val_MSE", val_metrics["mse"], epoch)
-                self.writer.add_scalar("Loss/Val_MAE", val_metrics["mae"], epoch)
-                self.writer.add_scalar("Loss/Val_RMSE", val_metrics["rmse"], epoch)
+                self.writer.add_scalar("Loss/Train_Total", train_metrics["loss"], epoch)
+                self.writer.add_scalar("Loss/Val_Total", val_metrics["loss"], epoch)
+                
+                # self.writer.add_scalar("Loss/Train_MSE", train_metrics["mse"], epoch)
+                # self.writer.add_scalar("Loss/Train_MAE", train_metrics["mae"], epoch)
+                # self.writer.add_scalar("Loss/Train_RMSE", train_metrics["rmse"], epoch)
+                # self.writer.add_scalar("Loss/Val_MSE", val_metrics["mse"], epoch)
+                # self.writer.add_scalar("Loss/Val_MAE", val_metrics["mae"], epoch)
+                # self.writer.add_scalar("Loss/Val_RMSE", val_metrics["rmse"], epoch)
                 self.writer.add_scalar("LR", self.optimizer.param_groups[0]["lr"], epoch)
 
                 print(
                     f"Epoch {epoch:03d} | "
-                    f"Train -> MSE: {train_metrics['mse']:.4f} | RMSE: {train_metrics['rmse']:.4f} | MAE: {train_metrics['mae']:.4f}\n"
+                    f"Train -> Loss: {train_metrics['loss']:.4f} | "
+                    f"MSE: {train_metrics['mse']:.4f} | "
+                    f"RMSE: {train_metrics['rmse']:.4f} | "
+                    f"MAE: {train_metrics['mae']:.4f}\n"
                     f"          | "
-                    f"Val   -> MSE: {val_metrics['mse']:.4f} | RMSE: {val_metrics['rmse']:.4f} | MAE: {val_metrics['mae']:.4f}"
+                    f"Val   -> Loss: {val_metrics['loss']:.4f} | "
+                    f"MSE: {val_metrics['mse']:.4f} | "
+                    f"RMSE: {val_metrics['rmse']:.4f} | "
+                    f"MAE: {val_metrics['mae']:.4f}"
                 )
-
+                
                 only_save_best_model = getattr(self.config, "only_save_best_model", False)
                 if not only_save_best_model:
                     # 1 checkpoint per epoch
@@ -403,7 +423,11 @@ class Baseline2BranchTrainer:
         )
 
         print(
-            f"Eval -> MSE: {metrics['mse']:.4f} | RMSE: {metrics['rmse']:.4f} | MAE: {metrics['mae']:.4f}"
+            f"Eval -> "
+            f"Loss: {metrics['loss']:.4f} | "
+            f"MSE: {metrics['mse']:.4f} | "
+            f"RMSE: {metrics['rmse']:.4f} | "
+            f"MAE: {metrics['mae']:.4f}"
         )
 
         if save_plot:

@@ -21,7 +21,7 @@ lr_scheduler: plateau
 
 weight_decay: 0.0001
 
-window_size: 8
+window_size: 16
 window_shift: 2
 
 val_split: 0.2
