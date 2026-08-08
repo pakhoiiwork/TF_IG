@@ -8,19 +8,19 @@ class TimeDomainBranch(nn.Module):
         super(TimeDomainBranch, self).__init__()
         
         self.stem1 = nn.Sequential(
-            nn.Conv1d(in_channels, out_channels, kernel_size=7, stride=1, padding=3),
-            nn.BatchNorm1d(out_channels),
+            nn.Conv1d(in_channels, out_channels//4, kernel_size=7, stride=1, padding=3),
+            nn.BatchNorm1d(out_channels//4),
             nn.ReLU(inplace=True)
         )
         
         self.stem2 = nn.Sequential(
-            nn.Conv1d(out_channels, out_channels, kernel_size=5, stride=1, padding=2),
-            nn.BatchNorm1d(out_channels),
+            nn.Conv1d(out_channels//4, out_channels//2, kernel_size=5, stride=1, padding=2),
+            nn.BatchNorm1d(out_channels//2),
             nn.ReLU(inplace=True)
         )
         
         self.stem3 = nn.Sequential(
-            nn.Conv1d(out_channels, out_channels, kernel_size=3, stride=1, padding=1),
+            nn.Conv1d(out_channels//2, out_channels, kernel_size=3, stride=1, padding=1),
             nn.BatchNorm1d(out_channels),
             nn.ReLU(inplace=True)
         )
@@ -155,6 +155,10 @@ class Baseline2Branch(nn.Module):
         )
         
         self.fusion_stem = FusionStem(in_channels=2*out_channels, out_channels=out_channels)
+        # self.regression_head_fused = RegressionHead(in_channels=out_channels, out_channels=1)
+        # self.regression_head_time = RegressionHead(in_channels=out_channels, out_channels=1)
+        # self.regression_head_freq = RegressionHead(in_channels=out_channels, out_channels=1)
+        
         self.regression_head = RegressionHead(in_channels=out_channels, out_channels=1)
         
         self.alpha = nn.Parameter(torch.tensor(0.6))
@@ -172,6 +176,10 @@ class Baseline2Branch(nn.Module):
         fused_output = self.fusion_stem(fused_features)  # (B, out_channels)
         
         # Regression heads
+        # fused_head = self.regression_head_fused(fused_output)  # (B, 1)
+        # time_head = self.regression_head_time(time_features)   # (B, 1
+        # freq_head = self.regression_head_freq(freq_features)   # (B, 1)``
+        
         fused_head = self.regression_head(fused_output)  # (B, 1)
         time_head = self.regression_head(time_features)   # (B, 1)
         freq_head = self.regression_head(freq_features)   # (B, 1)
