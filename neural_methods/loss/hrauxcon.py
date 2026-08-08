@@ -2,14 +2,13 @@ import torch
 from torch import nn
 
 class HRAuxConLoss(nn.Module):
-    def __init__(self, lambda_t=0.2, lambda_f=0.2, lambda_c=1.0):
+    def __init__(self, lambda_t=0.0, lambda_f=0.0, lambda_c=0.0):
         super().__init__()
 
-        # Fixed lambda
-        self.lambda_t = lambda_t
-        self.lambda_f = lambda_f
-        self.lambda_c = lambda_c
-
+        # Learnable lambda
+        self.lambda_t = nn.Parameter(torch.tensor(lambda_t))
+        self.lambda_f = nn.Parameter(torch.tensor(lambda_f))
+        self.lambda_c = nn.Parameter(torch.tensor(lambda_c))
 
         self.mse = nn.MSELoss()
 
