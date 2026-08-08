@@ -16,13 +16,7 @@ from utils.plot_prediction import plot_prediction
 
 
 def set_seed(seed: int) -> None:
-    """Initialize all random number generators with the same seed.
-
-    Seeds Python, NumPy, PyTorch, and CUDA (if available) to improve
-    reproducibility. This makes random operations, such as dataset shuffling,
-    weight initialization, dropout, and random sampling, deterministic across
-    runs when possible.
-    """
+    """Seed Python/NumPy/PyTorch (and CUDA, if available) RNGs for reproducibility."""
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
@@ -31,6 +25,8 @@ def set_seed(seed: int) -> None:
 
 
 class PPGWindowDataset(Dataset):
+    """Wraps PPG windows + HR labels, resampling each window to a fixed length."""
+
     def __init__(self, records, input_dim):
         self.records = records
         self.input_dim = input_dim
@@ -39,6 +35,7 @@ class PPGWindowDataset(Dataset):
         return len(self.records)
 
     def _resample(self, values):
+        """Resample one PPG window to exactly `input_dim` samples via linear interpolation."""
         signal = np.asarray(values, dtype=np.float32).reshape(-1)
 
         if signal.size == 0:
@@ -63,20 +60,27 @@ class PPGWindowDataset(Dataset):
 
 class BaselineTransformerTrainer:
     """
-    `config.mode` controls how much of the pipeline gets built and run,
-    mirroring the `TOOLBOX_MODE` pattern used in RhythmMambaTrainer:
+    Trains/evaluates a plain-MSE baseline PPG -> HR regressor.
 
-      - "train_and_evaluate": build optimizer/scheduler/checkpointing/logging,
-        run the full training loop, then evaluate the best checkpoint produced.
-      - "only_evaluate": skip all training machinery entirely — just load the
-        pretrained weights from `config.model_path` and evaluate.
+    `config.mode`: "train_and_test" trains with early stopping (val is used
+    only for best-checkpoint selection) then tests on held-out data;
+    "only_test" loads a pretrained checkpoint and evaluates it directly.
+    Subjects are split into disjoint train/val/test groups (never by window)
+    so overlapping windows from the same recording can't leak across splits
+    — see `_split_by_subject`.
     """
 
     def __init__(self, config):
+        """Build dataloaders and model, then set up training (optimizer/scheduler/
+        logging) or inference-only (load pretrained weights), based on `config.mode`."""
         self.config = config
-        self.mode = getattr(config, "mode", "train_and_evaluate")
+        self.mode = getattr(config, "mode", "train_and_test")
 
         set_seed(getattr(config, "seed", 42))
+
+        self.model_dir = os.path.join("pretrained_models", f"baseline_{config.dataset_name}")
+
+        self.train_loader, self.val_loader, self.test_loader, self.sampling_rate = self._build_dataloaders()
 
         self.model = BaselineTransformer(
             input_dim=config.input_dim,
@@ -87,16 +91,13 @@ class BaselineTransformerTrainer:
             num_layers=config.num_layers,
             output_dim=config.output_dim,
         )
+
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.model.to(self.device)
 
         self.criterion = nn.MSELoss()
 
-        self.train_loader, self.val_loader = self._build_dataloaders()
-
-        self.model_dir = os.path.join("pretrained_models", f"baseline_transformer_{config.dataset_name}")
-
-        if self.mode == "train_and_evaluate":
+        if self.mode == "train_and_test":
             self.optimizer = torch.optim.Adam(
                 self.model.parameters(),
                 lr=config.lr,
@@ -117,20 +118,17 @@ class BaselineTransformerTrainer:
             self.grad_clip_norm = getattr(config, "grad_clip_norm", None)
             self.early_stop_patience = getattr(config, "early_stop_patience", None)
 
-            self.checkpoint_dir = os.path.join(self.model_dir, "checkpoints")
-            os.makedirs(self.checkpoint_dir, exist_ok=True)
-
             self.writer = SummaryWriter(log_dir=os.path.join(self.model_dir, "logs"))
             self.best_val_rmse = float("inf")
             self.history_path = os.path.join(self.model_dir, "history.json")
 
-        elif self.mode == "only_evaluate":
-            # Inference-only: no optimizer/scheduler/writer/checkpoint dir needed.
-            # Just load the pretrained weights so `evaluate()` has something to score.
+        elif self.mode == "only_test":
+            # Inference-only: no optimizer/scheduler/writer needed.
+            # Just load the pretrained weights so `test()` has something to score.
             model_path = getattr(config, "model_path", "")
             if not model_path or not os.path.exists(model_path):
                 raise ValueError(
-                    "config.mode == 'only_evaluate' requires config.model_path to point "
+                    "config.mode == 'only_test' requires config.model_path to point "
                     f"to an existing checkpoint (got: {model_path!r})."
                 )
             self._load_model_weights(model_path)
@@ -139,10 +137,11 @@ class BaselineTransformerTrainer:
         else:
             raise ValueError(
                 f"Unsupported config.mode: {self.mode!r}. "
-                "Expected 'train_and_evaluate' or 'only_evaluate'."
+                "Expected 'train_and_test' or 'only_test'."
             )
 
     def _get_handler(self):
+        """Return the dataset handler (BIDMC or CapnoBase) for `config.dataset_name`."""
         dataset_name = self.config.dataset_name.lower()
 
         if dataset_name == "bidmc":
@@ -154,6 +153,7 @@ class BaselineTransformerTrainer:
         raise ValueError(f"Unsupported dataset: {self.config.dataset_name}")
 
     def _load_records(self):
+        """Load raw data into windows, dropping any with missing/NaN HR labels."""
         handler = self._get_handler()
         handler.get_raw_data_from_csv()
         records = handler.process_data(
@@ -174,53 +174,178 @@ class BaselineTransformerTrainer:
 
         return clean_records
 
-    def _split_by_subject(self, records):
-        """Split into train/val by subject id rather than by individual window.
+    def _split_subjects(self, subject_ids):
+        """Deterministically partition subject ids into disjoint train/val/test
+        sets, sized by `config.val_split`/`config.test_split` (default 0.15
+        each), guaranteeing at least 1 subject per split."""
+        val_split = getattr(self.config, "val_split", 0.15)
+        test_split = getattr(self.config, "test_split", 0.15)
 
-        `window_shift` is usually much smaller than `window_size` (e.g. 2s shift on
-        an 8s window = 75% overlap), so consecutive windows from the same recording
-        are near-duplicates. Splitting windows directly (the old `random_split`
-        approach) routinely puts near-identical windows on both sides of the split,
-        so the model is partly evaluated on signal it has already seen -> val
-        metrics look better than true generalization to an unseen subject. Splitting
-        by subject first removes that leakage.
-        """
-        subject_ids = sorted({r["id"] for r in records})
-        if len(subject_ids) < 2:
+        if val_split + test_split >= 1.0:
             raise ValueError(
-                "Need at least 2 subjects to create a subject-level train/val split; "
-                f"found {len(subject_ids)}."
+                f"val_split ({val_split}) + test_split ({test_split}) must sum to < 1.0"
+            )
+
+        n = len(subject_ids)
+        if n < 3:
+            raise ValueError(
+                "Need at least 3 subjects to create a non-empty train/val/test "
+                f"subject-level split; found {n}."
             )
 
         rng = random.Random(self.config.seed)
-        shuffled_subjects = subject_ids[:]
-        rng.shuffle(shuffled_subjects)
+        shuffled = subject_ids[:]
+        rng.shuffle(shuffled)
 
-        val_subject_count = max(1, round(len(shuffled_subjects) * self.config.val_split))
-        val_subject_count = min(val_subject_count, len(shuffled_subjects) - 1)  # keep >=1 train subject
+        n_val = max(1, round(n * val_split))
+        n_test = max(1, round(n * test_split))
 
-        val_subjects = set(shuffled_subjects[:val_subject_count])
-        train_subjects = set(shuffled_subjects[val_subject_count:])
+        # Shrink val/test (larger one first) until at least 1 subject is left for train.
+        while n_val + n_test >= n:
+            if n_val >= n_test:
+                n_val -= 1
+            else:
+                n_test -= 1
+            if n_val < 1 or n_test < 1:
+                raise ValueError(
+                    f"Not enough subjects ({n}) to carve out non-empty train/val/test "
+                    f"splits with val_split={val_split}, test_split={test_split}."
+                )
+
+        test_subjects = set(shuffled[:n_test])
+        val_subjects = set(shuffled[n_test:n_test + n_val])
+        train_subjects = set(shuffled[n_test + n_val:])
+
+        return train_subjects, val_subjects, test_subjects
+
+    def _save_split_info(self, train_subjects, val_subjects, test_subjects):
+        """Persist the train/val/test subject ids to `split_info.json`, so
+        reported test metrics can always be traced back to exactly which
+        subjects they were computed on."""
+        info = {
+            "seed": self.config.seed,
+            "train_subjects": sorted(train_subjects),
+            "val_subjects": sorted(val_subjects),
+            "test_subjects": sorted(test_subjects),
+        }
+        try:
+            os.makedirs(self.model_dir, exist_ok=True)
+            path = os.path.join(self.model_dir, "split_info.json")
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(info, f, indent=2)
+            print(f"[split] Subject split saved to {path}")
+        except OSError as e:
+            print(f"[split] Warning: could not save split_info.json ({e})")
+
+    def _split_info_path(self):
+        """Path to this run's split_info.json."""
+        return os.path.join(self.model_dir, "split_info.json")
+
+    def _load_split_info(self):
+        """Load a previously saved subject split, if one exists and is valid."""
+        path = self._split_info_path()
+        if not os.path.exists(path):
+            return None
+
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                split_info = json.load(f)
+        except (OSError, json.JSONDecodeError) as e:
+            print(f"[split] Warning: could not load split_info.json ({e})")
+            return None
+
+        required_keys = {"train_subjects", "val_subjects", "test_subjects"}
+        if not required_keys.issubset(split_info):
+            print(f"[split] Warning: split_info.json is missing required keys at {path}")
+            return None
+
+        return split_info
+
+    def _records_from_split_info(self, records, split_info):
+        """Re-apply a previously saved subject split to the current records."""
+        train_subjects = set(split_info["train_subjects"])
+        val_subjects = set(split_info["val_subjects"])
+        test_subjects = set(split_info["test_subjects"])
+
+        subject_ids = {r["id"] for r in records}
+        declared_subjects = train_subjects | val_subjects | test_subjects
+        missing_subjects = declared_subjects - subject_ids
+
+        if missing_subjects:
+            raise ValueError(
+                "Saved split_info.json references subjects that are not present in the current dataset: "
+                f"{sorted(missing_subjects)}"
+            )
 
         train_records = [r for r in records if r["id"] in train_subjects]
         val_records = [r for r in records if r["id"] in val_subjects]
+        test_records = [r for r in records if r["id"] in test_subjects]
+
+        print(
+            f"[split] Reused saved split -> "
+            f"{len(train_subjects)} train subjects ({len(train_records)} windows) / "
+            f"{len(val_subjects)} val subjects ({len(val_records)} windows) / "
+            f"{len(test_subjects)} test subjects ({len(test_records)} windows)"
+        )
+
+        return train_records, val_records, test_records
+
+    def _split_by_subject(self, records, split_info=None):
+        """Split records into train/val/test by subject id (not by window),
+        since window_shift << window_size means consecutive windows from the
+        same recording are near-duplicates and would leak across a window-level
+        split. Reuses `split_info` if given, otherwise creates and saves a new split."""
+        if split_info is not None:
+            return self._records_from_split_info(records, split_info)
+
+        subject_ids = sorted({r["id"] for r in records})
+        train_subjects, val_subjects, test_subjects = self._split_subjects(subject_ids)
+
+        train_records = [r for r in records if r["id"] in train_subjects]
+        val_records = [r for r in records if r["id"] in val_subjects]
+        test_records = [r for r in records if r["id"] in test_subjects]
 
         print(
             f"[split] {len(train_subjects)} train subjects ({len(train_records)} windows) / "
-            f"{len(val_subjects)} val subjects ({len(val_records)} windows)"
+            f"{len(val_subjects)} val subjects ({len(val_records)} windows) / "
+            f"{len(test_subjects)} test subjects ({len(test_records)} windows)"
         )
 
-        return train_records, val_records
+        self._save_split_info(train_subjects, val_subjects, test_subjects)
+
+        return train_records, val_records, test_records
 
     def _build_dataloaders(self):
+        """Load records, resolve the train/val/test subject split, and wrap
+        each subset in a DataLoader.
+
+        In `only_test` mode this requires an existing `split_info.json` — if
+        it's missing, we hard-fail instead of silently generating a fresh
+        split, since a mismatched split could evaluate the model on subjects
+        it was actually trained on."""
         records = self._load_records()
         if not records:
             raise ValueError("No processed records were produced from the dataset")
 
-        train_records, val_records = self._split_by_subject(records)
+        fs = records[0]["sampling_rate"]
+
+        split_info = None
+        if self.mode == "only_test":
+            split_info = self._load_split_info()
+            if split_info is None:
+                raise RuntimeError(
+                    f"[split] only_test mode requires an existing split_info.json at "
+                    f"{self._split_info_path()}, so the test subjects are guaranteed to "
+                    "match the split used for training. Refusing to fall back to a "
+                    "freshly generated split, since that could silently evaluate on "
+                    "subjects the model was trained on."
+                )
+
+        train_records, val_records, test_records = self._split_by_subject(records, split_info=split_info)
 
         train_dataset = PPGWindowDataset(train_records, self.config.input_dim)
         val_dataset = PPGWindowDataset(val_records, self.config.input_dim)
+        test_dataset = PPGWindowDataset(test_records, self.config.input_dim)
 
         train_loader = DataLoader(
             train_dataset,
@@ -234,10 +359,23 @@ class BaselineTransformerTrainer:
             shuffle=False,
             num_workers=getattr(self.config, "num_workers", 0),
         )
+        test_loader = DataLoader(
+            test_dataset,
+            batch_size=self.config.batch_size,
+            shuffle=False,
+            num_workers=getattr(self.config, "num_workers", 0),
+        )
 
-        return train_loader, val_loader
+        return train_loader, val_loader, test_loader, fs
 
     def _run_epoch(self, loader, training=True, return_predictions=False):
+        """Run one pass over `loader` (forward, plus backward+step if `training`),
+        returning averaged MSE/MAE/RMSE. Pass `return_predictions=True` to also
+        get back the raw predictions/labels (used for the prediction plot).
+
+        Note: this baseline's loss is plain MSE, so "loss" and "mse" are the
+        same number — there's no separate total-loss field like in trainers
+        with auxiliary losses (e.g. `Improved2BranchTrainer`)."""
         self.model.train() if training else self.model.eval()
 
         total_mse = 0.0
@@ -256,6 +394,10 @@ class BaselineTransformerTrainer:
             with torch.set_grad_enabled(training):
                 predictions = self.model(ppg)
                 if predictions.dim() > 1:
+                    # Assumes output_dim == 1 (one HR value per window), so squeezing
+                    # the last dim lines predictions up with hr's shape (batch,). If
+                    # output_dim is ever > 1, this will misalign with hr and needs
+                    # to be revisited (e.g. index the target HR channel explicitly).
                     predictions = predictions.squeeze(-1)
 
                 mse_loss = self.criterion(predictions, hr)
@@ -289,8 +431,9 @@ class BaselineTransformerTrainer:
             return metrics, all_predictions, all_true_values
 
         return metrics
-    
+
     def _save_checkpoint(self, epoch, train_metrics, val_metrics, path):
+        """Save model + optimizer state, plus this epoch's metrics, to `path`."""
         torch.save({
             "epoch": epoch,
             "model_state_dict": self.model.state_dict(),
@@ -300,28 +443,29 @@ class BaselineTransformerTrainer:
         }, path)
 
     def _load_model_weights(self, path):
-        """Load only the model weights from a checkpoint (no optimizer state).
-
-        Used for inference-only evaluation, where there's no optimizer to
-        restore. Handles both full checkpoint dicts saved by `_save_checkpoint`
-        (which have a "model_state_dict" key) and raw state_dicts saved by
-        `save_model`.
-        """
+        """Load only the model weights from a checkpoint (no optimizer state),
+        for inference-only evaluation. Handles both full checkpoint dicts saved
+        by `_save_checkpoint` and raw state_dicts saved by `save_model`."""
         checkpoint = torch.load(path, map_location=self.device)
         state_dict = checkpoint.get("model_state_dict", checkpoint) if isinstance(checkpoint, dict) else checkpoint
         self.model.load_state_dict(state_dict)
 
     def load_checkpoint(self, path):
-        """Resume training from a full checkpoint saved by `_save_checkpoint`
-        (restores both model and optimizer state)."""
+        """Load model + optimizer state from a full checkpoint (e.g. `best_model.pth`)
+        to resume training; returns the epoch it was saved at."""
         checkpoint = torch.load(path, map_location=self.device)
         self.model.load_state_dict(checkpoint["model_state_dict"])
         self.optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
         return checkpoint["epoch"]
 
     def train(self):
-        if self.mode != "train_and_evaluate":
-            raise RuntimeError("train() requires config.mode == 'train_and_evaluate'")
+        """Run the training loop: each epoch, train + validate, log to
+        TensorBoard/history.json, and save `best_model.pth` whenever val RMSE
+        improves (this is the only checkpoint kept — no per-epoch checkpoints).
+        Stops early if `config.early_stop_patience` epochs pass with no
+        val-RMSE improvement."""
+        if self.mode != "train_and_test":
+            raise RuntimeError("train() requires config.mode == 'train_and_test'")
 
         history = []
         epochs_without_improvement = 0
@@ -345,32 +489,22 @@ class BaselineTransformerTrainer:
                     "lr": self.optimizer.param_groups[0]["lr"],
                 })
 
-                self.writer.add_scalar("Loss/Train_MSE", train_metrics["mse"], epoch)
-                # self.writer.add_scalar("Loss/Train_MAE", train_metrics["mae"], epoch)
-                # self.writer.add_scalar("Loss/Train_RMSE", train_metrics["rmse"], epoch)
-                self.writer.add_scalar("Loss/Val_MSE", val_metrics["mse"], epoch)
-                # self.writer.add_scalar("Loss/Val_MAE", val_metrics["mae"], epoch)
-                # self.writer.add_scalar("Loss/Val_RMSE", val_metrics["rmse"], epoch)
+                self.writer.add_scalar("Loss/Train", train_metrics["mse"], epoch)
+                self.writer.add_scalar("Loss/Val", val_metrics["mse"], epoch)
                 self.writer.add_scalar("LR", self.optimizer.param_groups[0]["lr"], epoch)
 
                 print(
                     f"Epoch {epoch:03d} | "
-                    f"Train -> MSE: {train_metrics['mse']:.4f} | RMSE: {train_metrics['rmse']:.4f} | MAE: {train_metrics['mae']:.4f}\n"
+                    f"Train -> MSE: {train_metrics['mse']:.4f} | "
+                    f"RMSE: {train_metrics['rmse']:.4f} | "
+                    f"MAE: {train_metrics['mae']:.4f}\n"
                     f"          | "
-                    f"Val   -> MSE: {val_metrics['mse']:.4f} | RMSE: {val_metrics['rmse']:.4f} | MAE: {val_metrics['mae']:.4f}"
+                    f"Val   -> MSE: {val_metrics['mse']:.4f} | "
+                    f"RMSE: {val_metrics['rmse']:.4f} | "
+                    f"MAE: {val_metrics['mae']:.4f}"
                 )
 
-                only_save_best_model = getattr(self.config, "only_save_best_model", False)
-                if not only_save_best_model:
-                    # 1 checkpoint per epoch
-                    epoch_ckpt_path = os.path.join(self.checkpoint_dir, f"epoch_{epoch:03d}.pth")
-                    self._save_checkpoint(epoch, train_metrics, val_metrics, epoch_ckpt_path)
-
-                    # rolling pointer to the latest epoch, for easy resuming
-                    last_ckpt_path = os.path.join(self.checkpoint_dir, "last.pth")
-                    self._save_checkpoint(epoch, train_metrics, val_metrics, last_ckpt_path)
-
-                # best model tracked separately by val RMSE
+                # Only the best-val-RMSE checkpoint is kept.
                 if val_metrics["rmse"] < self.best_val_rmse:
                     self.best_val_rmse = val_metrics["rmse"]
                     epochs_without_improvement = 0
@@ -396,46 +530,66 @@ class BaselineTransformerTrainer:
 
         return history
 
-    def evaluate(self, loader=None, save_plot=True):
-        loader = self.val_loader if loader is None else loader
-
-        if self.mode == "train_and_evaluate":
+    def test(self, save_plot=True, save_report=True):
+        """Evaluate on the held-out test set — the number to report.
+        In `train_and_test` mode, reloads `best_model.pth` first (independent
+        of whatever weights are in memory); in `only_test` mode, scores
+        whatever weights were already loaded from `config.model_path`."""
+        if self.mode == "train_and_test":
             best_ckpt_path = os.path.join(self.model_dir, "best_model.pth")
             if os.path.exists(best_ckpt_path):
                 self._load_model_weights(best_ckpt_path)
-                print(f"[eval] Loaded best checkpoint from {best_ckpt_path}")
+                print(f"[test] Loaded best checkpoint from {best_ckpt_path}")
 
         metrics, predictions, true_values = self._run_epoch(
-            loader, training=False, return_predictions=True
+            self.test_loader, training=False, return_predictions=True
         )
 
         print(
-            f"Eval -> MSE: {metrics['mse']:.4f} | RMSE: {metrics['rmse']:.4f} | MAE: {metrics['mae']:.4f}"
+            f"Test -> "
+            f"MSE: {metrics['mse']:.4f} | "
+            f"RMSE: {metrics['rmse']:.4f} | "
+            f"MAE: {metrics['mae']:.4f}"
         )
 
         if save_plot:
             os.makedirs(self.model_dir, exist_ok=True)
-            plot_path = os.path.join(self.model_dir, "eval_predictions_plot.png")
+            plot_path = os.path.join(self.model_dir, "eval_predictions_test.png")
             plot_prediction(predictions, true_values, save_path=plot_path)
-            print(f"[eval] Prediction plot saved to {plot_path}")
+            print(f"[test] Prediction plot saved to {plot_path}")
+
+        if save_report:
+            self._save_final_report(metrics)
 
         return metrics
 
-    def run(self):
-        """Single entry point: dispatches on `config.mode`, the same way an
-        external `main.py` dispatches on `TOOLBOX_MODE` for RhythmMamba
-        ("train_and_test" -> train() then test(); "only_test" -> test() only).
+    def _save_final_report(self, test_metrics):
+        """Write the final test metrics (and best val RMSE, if available) to
+        `test_report.json` — this is the number that should go in a paper."""
+        report = {"test_metrics": test_metrics}
+        if self.mode == "train_and_test":
+            report["best_val_rmse"] = self.best_val_rmse
 
-        Usage:
-            trainer = BaselineTrainer(config)
-            trainer.run()
-        """
-        if self.mode == "train_and_evaluate":
+        try:
+            os.makedirs(self.model_dir, exist_ok=True)
+            report_path = os.path.join(self.model_dir, "test_report.json")
+            with open(report_path, "w", encoding="utf-8") as f:
+                json.dump(report, f, indent=2)
+            print(f"[report] Test report saved to {report_path}")
+        except OSError as e:
+            print(f"[report] Warning: could not save test_report.json ({e})")
+
+    def run(self):
+        """Single entry point, dispatched on `config.mode`: "train_and_test"
+        trains then tests on held-out data; "only_test" tests the loaded
+        checkpoint directly. Either way, returns the test metrics."""
+        if self.mode == "train_and_test":
             self.train()
             print("=" * 65)
-            return self.evaluate()
-        else:  # only_evaluate
-            return self.evaluate()
+            return self.test()
+        else:  # only_test
+            return self.test()
 
     def save_model(self, path):
+        """Save just the raw model state_dict to `path`."""
         torch.save(self.model.state_dict(), path)
