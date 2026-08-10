@@ -29,6 +29,6 @@ seed: 42
 num_workers: 4
 
 only_save_best_model: true
-mode: "train_and_evaluate"
+mode: "train_and_test"
 
 model_path: ""

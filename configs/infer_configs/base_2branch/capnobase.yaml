@@ -30,6 +30,6 @@ seed: 42
 num_workers: 4
 
 only_save_best_model: true
-mode: "only_evaluate"
+mode: "only_test"
 
 model_path: "pretrained_models/baseline_2branch_capnobase/best_model.pth"
