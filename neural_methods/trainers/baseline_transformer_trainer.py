@@ -78,7 +78,7 @@ class BaselineTransformerTrainer:
 
         set_seed(getattr(config, "seed", 42))
 
-        self.model_dir = os.path.join("pretrained_models", f"baseline_{config.dataset_name}")
+        self.model_dir = os.path.join("pretrained_models", f"baseline_transformer_{config.dataset_name}")
 
         self.train_loader, self.val_loader, self.test_loader, self.sampling_rate = self._build_dataloaders()
 

@@ -5,10 +5,13 @@ class HRAuxConLoss(nn.Module):
     def __init__(self, lambda_t=0.0, lambda_f=0.0, lambda_c=0.0):
         super().__init__()
 
-        # Learnable lambda
+        # # Learnable lambda
         self.lambda_t = nn.Parameter(torch.tensor(lambda_t))
         self.lambda_f = nn.Parameter(torch.tensor(lambda_f))
         self.lambda_c = nn.Parameter(torch.tensor(lambda_c))
+        # self.lambda_t = lambda_t
+        # self.lambda_f = lambda_f
+        # self.lambda_c = lambda_c
 
         self.mse = nn.MSELoss()
 

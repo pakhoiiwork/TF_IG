@@ -210,25 +210,44 @@ class TimeDomainBranch(nn.Module):
         out_channels=64,
     ):
         super().__init__()
+        
+        mid_channels = max(
+            16,
+            out_channels // 2,
+        )
 
         # Initial local morphology extractor
         self.stem = nn.Sequential(
             nn.Conv1d(
                 in_channels,
-                out_channels,
+                mid_channels,
                 kernel_size=7,
-                stride=1,
                 padding=3,
                 bias=False,
             ),
+            nn.BatchNorm1d(mid_channels),
+            nn.ReLU(inplace=True),
+
+            DepthwiseSeparableConv1d(
+                mid_channels,
+                out_channels,
+                kernel_size=5,
+                dilation=2
+            ),
             nn.BatchNorm1d(out_channels),
             nn.ReLU(inplace=True),
+            
+            DepthwiseSeparableConv1d(
+                out_channels,
+                out_channels,
+                kernel_size=5,
+                dilation=4
+            ),
         )
-
 
         self.block1 = LightweightResidualBlock1d(
             out_channels,
-            kernel_size=5,
+            kernel_size=7,
             dilation=1,
         )
 
@@ -251,7 +270,7 @@ class TimeDomainBranch(nn.Module):
 
     def forward(self, x):
         """
-        x:
+        x:`
             (B, D)
 
         return:
@@ -287,10 +306,11 @@ class DepthwiseSeparableConv2d(nn.Module):
         in_channels,
         out_channels,
         kernel_size=3,
+        dilation=1,
     ):
         super().__init__()
 
-        padding = kernel_size // 2
+        padding = dilation * (kernel_size - 1) // 2
 
         self.depthwise = nn.Conv2d(
             in_channels,
@@ -299,6 +319,7 @@ class DepthwiseSeparableConv2d(nn.Module):
             padding=padding,
             groups=in_channels,
             bias=False,
+            dilation=dilation
         )
 
         self.pointwise = nn.Conv2d(
@@ -445,24 +466,29 @@ class FrequencyDomainBranch(nn.Module):
             nn.Conv2d(
                 in_channels,
                 mid_channels,
-                kernel_size=3,
+                kernel_size=7,
                 padding=1,
                 bias=False,
             ),
             nn.BatchNorm2d(mid_channels),
             nn.ReLU(inplace=True),
-
+            
             DepthwiseSeparableConv2d(
                 mid_channels,
                 out_channels,
-                kernel_size=3,
+                kernel_size=5,
+                dilation=2
             ),
-
+            
+            nn.BatchNorm2d(out_channels),
+            nn.ReLU(inplace=True),
+            
             DepthwiseSeparableConv2d(
                 out_channels,
                 out_channels,
-                kernel_size=3,
-            ),
+                kernel_size=5,
+                dilation=4  
+            )
         )
 
         self.spectro_temporal_attention = (
@@ -731,15 +757,18 @@ class Improved2Branch(nn.Module):
 
         # Separate heads because each representation
         # comes from a different feature space.
-        self.fused_head = RegressionHead(
-            in_channels=out_channels,
-        )
+        # self.fused_head = RegressionHead(
+        #     in_channels=out_channels,
+        # )
 
-        self.time_head = RegressionHead(
-            in_channels=out_channels,
-        )
+        # self.time_head = RegressionHead(
+        #     in_channels=out_channels,
+        # )
 
-        self.freq_head = RegressionHead(
+        # self.freq_head = RegressionHead(
+        #     in_channels=out_channels,
+        # )
+        self.head = RegressionHead(
             in_channels=out_channels,
         )
 
@@ -797,15 +826,15 @@ class Improved2Branch(nn.Module):
         # Regression
         # ------------------------------------------------
 
-        fused_pred = self.fused_head(
+        fused_pred = self.head(
             fused_features
         ).squeeze(-1)
 
-        time_pred = self.time_head(
+        time_pred = self.head(
             time_features
         ).squeeze(-1)
 
-        freq_pred = self.freq_head(
+        freq_pred = self.head(
             freq_features
         ).squeeze(-1)
 

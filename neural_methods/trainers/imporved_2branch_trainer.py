@@ -8,7 +8,8 @@ import torch.nn as nn
 from torch.utils.data import DataLoader, Dataset
 from torch.utils.tensorboard import SummaryWriter
 
-from neural_methods.models.baseline_2branch_v2_Phat import Improved2Branch as Baseline2Branch
+from neural_methods.models.base_i2branch import Improved2Branch as Baseline2Branch
+# from neural_methods.models.improved_2branch import Improved2Branch as Baseline2Branch
 from neural_methods.loss.hrauxcon import HRAuxConLoss
 from data_handler.bidmc_hanlder import BIDMC_Handler
 from data_handler.capnobase_handler import CAPNOBASE_Handler
@@ -79,11 +80,11 @@ class Improved2BranchTrainer:
 
         set_seed(getattr(config, "seed", 42))
 
-        self.model_dir = os.path.join("pretrained_models", f"baseline_{config.dataset_name}")
+        self.model_dir = os.path.join("pretrained_models", f"improved_2branch_{config.dataset_name}")
 
         self.train_loader, self.val_loader, self.test_loader, self.sampling_rate = self._build_dataloaders()
 
-        self.model = Baseline2Branch()
+        self.model = Baseline2Branch(sampling_rate=self.sampling_rate)
 
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.model.to(self.device)
