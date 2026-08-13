@@ -25,7 +25,7 @@ window_size: 16
 window_shift: 2
 
 val_split: 0.2
-seed: 42
+seed: 36
 num_workers: 4
 
 only_save_best_model: true

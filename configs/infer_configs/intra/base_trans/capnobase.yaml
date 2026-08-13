@@ -26,10 +26,11 @@ window_size: 16
 window_shift: 2
 
 val_split: 0.2
-seed: 42
+test_split: 0.2
+seed: 36
 num_workers: 4
 
 only_save_best_model: true
 mode: "only_test"
 
-model_path: "pretrained_models/baseline_capnobase/best_model.pth"
+model_path: "pretrained_models/baseline_transformer_capnobase/best_model.pth"

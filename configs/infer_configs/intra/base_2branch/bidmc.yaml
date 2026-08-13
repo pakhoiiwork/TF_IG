@@ -1,9 +1,9 @@
-dataset_name: capnobase
-data_path: datasets/CapnoBase/data/csv
+dataset_name: bidmc
+data_path: datasets/bidmc-ppg-and-respiration-dataset-1.0.0/bidmc_csv
 
 # Model parameters
-input_dim: 2400
-hidden_dim1: 1024
+input_dim: 1000
+hidden_dim1: 512
 hidden_dim2: 256
 hidden_dim3: 64
 output_dim: 1
@@ -26,10 +26,11 @@ window_size: 16
 window_shift: 2
 
 val_split: 0.2
-seed: 42
+test_split: 0.2
+seed: 36
 num_workers: 4
 
 only_save_best_model: true
 mode: "only_test"
 
-model_path: "pretrained_models/baseline_2branch_capnobase/best_model.pth"
+model_path: "pretrained_models/baseline_bidmc/best_model.pth"

@@ -17,19 +17,20 @@ batch_size: 80
 epochs: 150
 
 lr: 0.001
-lr_patience: 16
+lr_patience: 8
 lr_scheduler: plateau
 
 weight_decay: 0.0001
 
-window_size: 8
+window_size: 16
 window_shift: 2
 
 val_split: 0.2
-seed: 42
+test_split: 0.2
+seed: 36
 num_workers: 4
 
 only_save_best_model: true
 mode: "only_test"
 
-model_path: "pretrained_models/baseline_transformer_bidmc/best_model.pth"
+model_path: "pretrained_models/baseline_bidmc/best_model.pth"
