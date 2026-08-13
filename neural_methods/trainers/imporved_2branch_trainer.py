@@ -361,16 +361,87 @@ class Improved2BranchTrainer:
         )
 
         return train_loader, val_loader, test_loader, fs
+    
+    def _compute_metrics(self, y_true, y_pred):
+        """
+        Compute evaluation metrics exactly like the TensorFlow evaluation code.
+
+        Metrics:
+            MAE
+            MSE
+            RMSE
+            R2
+            Pearson_r
+            Mean_Error (Bias)
+        """
+        y_true = np.asarray(y_true).ravel().astype(np.float64)
+        y_pred = np.asarray(y_pred).ravel().astype(np.float64)
+
+        # MAE
+        mae = float(np.mean(np.abs(y_pred - y_true)))
+
+        # MSE
+        mse = float(np.mean((y_pred - y_true) ** 2))
+
+        # RMSE
+        rmse = float(np.sqrt(mse))
+
+        # R2
+        ss_res = np.sum((y_true - y_pred) ** 2)
+        ss_tot = np.sum((y_true - np.mean(y_true)) ** 2)
+
+        r2 = (
+            float(1.0 - ss_res / ss_tot)
+            if ss_tot > 0.0
+            else float("nan")
+        )
+
+        # Pearson R
+        pearson_r = (
+            float(np.corrcoef(y_true, y_pred)[0, 1])
+            if y_true.std() > 0.0 and y_pred.std() > 0.0
+            else float("nan")
+        )
+
+        # Bias / Mean Error
+        mean_error = float(np.mean(y_pred - y_true))
+
+        return {
+            "MAE": mae,
+            "MSE": mse,
+            "RMSE": rmse,
+            "R2": r2,
+            "Pearson_r": pearson_r,
+            "Mean_Error": mean_error,
+        }
+
+
+    def _print_metrics(self, model_name, metrics):
+        """
+        Print metrics in exactly the same format as the TensorFlow code.
+        """
+        print(
+            "[" + model_name + "] "
+            "MAE: {MAE:.4f} | MSE: {MSE:.4f} | RMSE: {RMSE:.4f} | "
+            "R2: {R2:.4f} | Pearson r: {Pearson_r:.4f} | "
+            "Bias (Mean Error): {Mean_Error:.4f}".format(**metrics)
+        )
 
     def _run_epoch(self, loader, training=True, return_predictions=False):
-        """Run one pass over `loader` (forward, plus backward+step if `training`),
-        returning averaged MSE/MAE/RMSE plus the total loss from `HRAuxConLoss`.
-        Pass `return_predictions=True` to also get back the raw predictions/labels
-        (used for the prediction plot)."""
+        """
+        Run one epoch.
+
+        During training/validation:
+            - computes MSE, MAE, RMSE and total HRAuxConLoss
+            - does not need predictions
+
+        During test:
+            - collects ALL predictions and ALL ground-truth values
+            - computes metrics globally over the complete test set
+            - uses exactly the same metric definitions as the TensorFlow code
+        """
         self.model.train() if training else self.model.eval()
 
-        total_mse = 0.0
-        total_mae = 0.0
         total_loss_sum = 0.0
         total_count = 0
 
@@ -384,62 +455,167 @@ class Improved2BranchTrainer:
                 self.optimizer.zero_grad()
 
             with torch.set_grad_enabled(training):
+
                 model_output = self.model(ppg)
+
                 if isinstance(model_output, (tuple, list)):
                     if len(model_output) != 3:
                         raise ValueError(
                             f"Expected 3 outputs from model, got {len(model_output)}"
                         )
+
                     hr_pred, hr_time, hr_freq = model_output
+
                 else:
                     hr_pred = model_output
                     hr_time = model_output
                     hr_freq = model_output
 
+                # Match shapes
                 if hr_pred.dim() > 1:
                     hr_pred = hr_pred.squeeze(-1)
+
                 if hr_time.dim() > 1:
                     hr_time = hr_time.squeeze(-1)
+
                 if hr_freq.dim() > 1:
                     hr_freq = hr_freq.squeeze(-1)
 
-                total_loss, loss_components = self.criterion(hr_pred, hr_time, hr_freq, hr)
-                mse_loss = torch.mean((hr_pred - hr) ** 2)
-                mae_loss = torch.mean(torch.abs(hr_pred - hr))
+                # Original BL-PPG training loss
+                total_loss, loss_components = self.criterion(
+                    hr_pred,
+                    hr_time,
+                    hr_freq,
+                    hr,
+                )
 
                 if training:
                     total_loss.backward()
+
                     if self.grad_clip_norm:
-                        nn.utils.clip_grad_norm_(self.model.parameters(), self.grad_clip_norm)
+                        nn.utils.clip_grad_norm_(
+                            self.model.parameters(),
+                            self.grad_clip_norm,
+                        )
+
                     self.optimizer.step()
-                elif return_predictions:
-                    pred_true_pairs.append((hr_pred.detach().cpu().numpy(), hr.detach().cpu().numpy()))
+
+                # Save ALL predictions/targets for global test evaluation
+                if return_predictions:
+                    pred_true_pairs.append(
+                        (
+                            hr_pred.detach().cpu().numpy(),
+                            hr.detach().cpu().numpy(),
+                        )
+                    )
 
             batch_size = ppg.size(0)
+
             total_loss_sum += total_loss.item() * batch_size
-            total_mse += mse_loss.item() * batch_size
-            total_mae += mae_loss.item() * batch_size
             total_count += batch_size
 
         if total_count == 0:
-            raise RuntimeError("Dataloader produced zero samples for this epoch")
+            raise RuntimeError(
+                "Dataloader produced zero samples for this epoch"
+            )
 
-        avg_mse = total_mse / total_count
-        avg_mae = total_mae / total_count
-        avg_rmse = float(np.sqrt(avg_mse))
         avg_total_loss = total_loss_sum / total_count
 
+        # ---------------------------------------------------------
+        # Evaluation metrics
+        # ---------------------------------------------------------
+        if return_predictions and pred_true_pairs:
+
+            all_predictions = np.concatenate(
+                [p for p, t in pred_true_pairs]
+            )
+
+            all_true_values = np.concatenate(
+                [t for p, t in pred_true_pairs]
+            )
+
+            # EXACTLY the same calculation as TensorFlow code
+            evaluation_metrics = self._compute_metrics(
+                all_true_values,
+                all_predictions,
+            )
+
+            metrics = {
+                "mse": evaluation_metrics["MSE"],
+                "mae": evaluation_metrics["MAE"],
+                "rmse": evaluation_metrics["RMSE"],
+                "r2": evaluation_metrics["R2"],
+                "pearson_r": evaluation_metrics["Pearson_r"],
+                "mean_error": evaluation_metrics["Mean_Error"],
+                "total_loss": avg_total_loss,
+            }
+
+            return (
+                metrics,
+                all_predictions,
+                all_true_values,
+            )
+
+        # ---------------------------------------------------------
+        # Training / validation
+        # ---------------------------------------------------------
+        #
+        # Keep the original BL-PPG behavior for training and
+        # validation. These metrics are not used for the final
+        # TensorFlow-style test report.
+        #
+        # We calculate them globally here as well.
+        # ---------------------------------------------------------
+
+        all_predictions = []
+        all_true_values = []
+
+        # If predictions were not requested, we need one additional
+        # forward pass to calculate training/validation metrics.
+        self.model.eval()
+
+        with torch.no_grad():
+
+            for ppg, hr in loader:
+
+                ppg = ppg.to(self.device)
+                hr = hr.to(self.device)
+
+                model_output = self.model(ppg)
+
+                if isinstance(model_output, (tuple, list)):
+                    hr_pred = model_output[0]
+                else:
+                    hr_pred = model_output
+
+                if hr_pred.dim() > 1:
+                    hr_pred = hr_pred.squeeze(-1)
+
+                all_predictions.append(
+                    hr_pred.cpu().numpy()
+                )
+
+                all_true_values.append(
+                    hr.cpu().numpy()
+                )
+
+        all_predictions = np.concatenate(all_predictions)
+        all_true_values = np.concatenate(all_true_values)
+
+        evaluation_metrics = self._compute_metrics(
+            all_true_values,
+            all_predictions,
+        )
+
         metrics = {
-            "mse": avg_mse,
-            "mae": avg_mae,
-            "rmse": avg_rmse,
+            "mse": evaluation_metrics["MSE"],
+            "mae": evaluation_metrics["MAE"],
+            "rmse": evaluation_metrics["RMSE"],
+            "r2": evaluation_metrics["R2"],
+            "pearson_r": evaluation_metrics["Pearson_r"],
+            "mean_error": evaluation_metrics["Mean_Error"],
             "total_loss": avg_total_loss,
         }
-
-        if return_predictions and pred_true_pairs:
-            all_predictions = np.concatenate([p for p, t in pred_true_pairs])
-            all_true_values = np.concatenate([t for p, t in pred_true_pairs])
-            return metrics, all_predictions, all_true_values
 
         return metrics
 
@@ -548,32 +724,77 @@ class Improved2BranchTrainer:
         return history
 
     def test(self, save_plot=True, save_report=True):
-        """Evaluate on the held-out test set — the number to report.
-        In `train_and_test` mode, reloads `best_model.pth` first (independent
-        of whatever weights are in memory); in `only_test` mode, scores
-        whatever weights were already loaded from `config.model_path`."""
+        """
+        Evaluate on the held-out test set.
+
+        Metrics are calculated exactly like the TensorFlow evaluation code:
+            MAE
+            MSE
+            RMSE
+            R2
+            Pearson R
+            Bias / Mean Error
+        """
+
         if self.mode == "train_and_test":
-            best_ckpt_path = os.path.join(self.model_dir, "best_model.pth")
+
+            best_ckpt_path = os.path.join(
+                self.model_dir,
+                "best_model.pth",
+            )
+
             if os.path.exists(best_ckpt_path):
-                self._load_model_weights(best_ckpt_path)
-                print(f"[test] Loaded best checkpoint from {best_ckpt_path}")
+
+                self._load_model_weights(
+                    best_ckpt_path
+                )
+
+                print(
+                    f"[test] Loaded best checkpoint from "
+                    f"{best_ckpt_path}"
+                )
 
         metrics, predictions, true_values = self._run_epoch(
-            self.test_loader, training=False, return_predictions=True
+            self.test_loader,
+            training=False,
+            return_predictions=True,
         )
 
-        print(
-            f"Test -> "
-            f"MSE: {metrics['mse']:.4f} | "
-            f"RMSE: {metrics['rmse']:.4f} | "
-            f"MAE: {metrics['mae']:.4f}"
+        # Print EXACTLY like TensorFlow evaluation
+        self._print_metrics(
+            "Improved2Branch",
+            {
+                "MAE": metrics["mae"],
+                "MSE": metrics["mse"],
+                "RMSE": metrics["rmse"],
+                "R2": metrics["r2"],
+                "Pearson_r": metrics["pearson_r"],
+                "Mean_Error": metrics["mean_error"],
+            },
         )
 
         if save_plot:
-            os.makedirs(self.model_dir, exist_ok=True)
-            plot_path = os.path.join(self.model_dir, "eval_predictions_test.png")
-            plot_prediction(predictions, true_values, save_path=plot_path)
-            print(f"[test] Prediction plot saved to {plot_path}")
+
+            os.makedirs(
+                self.model_dir,
+                exist_ok=True,
+            )
+
+            plot_path = os.path.join(
+                self.model_dir,
+                "eval_predictions_test.png",
+            )
+
+            plot_prediction(
+                predictions,
+                true_values,
+                save_path=plot_path,
+            )
+
+            print(
+                f"[test] Prediction plot saved to "
+                f"{plot_path}"
+            )
 
         if save_report:
             self._save_final_report(metrics)
