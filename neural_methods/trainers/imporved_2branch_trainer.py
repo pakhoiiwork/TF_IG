@@ -70,6 +70,29 @@ class Improved2BranchTrainer:
     Subjects are split into disjoint train/val/test groups (never by window)
     so overlapping windows from the same recording can't leak across splits
     — see `_split_by_subject`.
+
+    Metric computation (`_run_epoch`):
+    - Single pass over the loader (train: forward+backward+step; val/test:
+      forward only under no_grad) — no redundant second pass.
+    - Every batch's predictions/labels are collected and concatenated at the
+      end of the epoch; MAE/MSE/RMSE/R2/Pearson_r/Mean_Error are then computed
+      ONCE, globally, via `_compute_metrics`. This matters because R2 and
+      Pearson r are NOT separable across batches — averaging per-batch R2/Pearson
+      values (weighted or not) gives a mathematically different, and wrong,
+      number for the whole set. Only MAE/MSE (and therefore RMSE, taken as
+      sqrt of the global MSE) are batch-summable; R2/Pearson require the full
+      concatenated arrays regardless, so we compute everything from those
+      arrays for consistency instead of duplicating the accumulation logic.
+    - For TRAIN batches specifically, each batch's predictions are captured
+      *before* that batch's `optimizer.step()` and while the model is in
+      `train()` mode (so Dropout/BatchNorm behave as during training). This
+      means `train_*` metrics reported per epoch are a "running" estimate
+      (like Keras' on_batch metrics) accumulated across a moving set of
+      weights within the epoch — not a clean end-of-epoch re-evaluation of a
+      single frozen weight snapshot. This is intentional (matches the more
+      efficient single-pass design) but should not be compared 1:1 against
+      `val_*`/test metrics, which ARE a clean single-weight-snapshot
+      evaluation (val/test never call `optimizer.step()`).
     """
 
     def __init__(self, config):
@@ -361,10 +384,15 @@ class Improved2BranchTrainer:
         )
 
         return train_loader, val_loader, test_loader, fs
-    
+
     def _compute_metrics(self, y_true, y_pred):
         """
-        Compute evaluation metrics exactly like the TensorFlow evaluation code.
+        Compute evaluation metrics exactly like the TensorFlow evaluation code,
+        GLOBALLY over the full (concatenated) arrays passed in. Must always be
+        called on the complete set of predictions/labels for a split — never
+        averaged/combined from per-batch metric values, since R2 and Pearson r
+        are not batch-separable (their averages across batches are not equal
+        to the value computed on the full set).
 
         Metrics:
             MAE
@@ -415,11 +443,8 @@ class Improved2BranchTrainer:
             "Mean_Error": mean_error,
         }
 
-
     def _print_metrics(self, model_name, metrics):
-        """
-        Print metrics in exactly the same format as the TensorFlow code.
-        """
+        """Print metrics in exactly the same format as the TensorFlow code."""
         print(
             "[" + model_name + "] "
             "MAE: {MAE:.4f} | MSE: {MSE:.4f} | RMSE: {RMSE:.4f} | "
@@ -428,23 +453,28 @@ class Improved2BranchTrainer:
         )
 
     def _run_epoch(self, loader, training=True, return_predictions=False):
-        """
-        Run one epoch.
+        """Run ONE pass over `loader` (forward, plus backward+step if `training`).
 
-        During training/validation:
-            - computes MSE, MAE, RMSE and total HRAuxConLoss
-            - does not need predictions
+        Every batch's predictions/labels are collected as we go, then
+        concatenated once at the end to compute full-set metrics (MAE, MSE,
+        RMSE, R2, Pearson_r, Mean_Error) via `_compute_metrics`. This avoids
+        a second forward-only pass (unlike a naive two-pass implementation)
+        while still being numerically correct for R2/Pearson r, which cannot
+        be derived from per-batch averages.
 
-        During test:
-            - collects ALL predictions and ALL ground-truth values
-            - computes metrics globally over the complete test set
-            - uses exactly the same metric definitions as the TensorFlow code
+        For TRAIN, predictions are captured pre-`optimizer.step()` for that
+        batch, in `train()` mode — so `train_*` metrics are a running,
+        within-epoch estimate over a moving set of weights, not a clean
+        single-snapshot evaluation. VAL/TEST never call `optimizer.step()`,
+        so their metrics ARE a clean single-snapshot evaluation.
+
+        Returns `metrics` (dict), or `(metrics, predictions, true_values)`
+        if `return_predictions=True`.
         """
         self.model.train() if training else self.model.eval()
 
         total_loss_sum = 0.0
         total_count = 0
-
         pred_true_pairs = []
 
         for ppg, hr in loader:
@@ -455,7 +485,6 @@ class Improved2BranchTrainer:
                 self.optimizer.zero_grad()
 
             with torch.set_grad_enabled(training):
-
                 model_output = self.model(ppg)
 
                 if isinstance(model_output, (tuple, list)):
@@ -463,149 +492,46 @@ class Improved2BranchTrainer:
                         raise ValueError(
                             f"Expected 3 outputs from model, got {len(model_output)}"
                         )
-
                     hr_pred, hr_time, hr_freq = model_output
-
                 else:
                     hr_pred = model_output
                     hr_time = model_output
                     hr_freq = model_output
 
-                # Match shapes
                 if hr_pred.dim() > 1:
                     hr_pred = hr_pred.squeeze(-1)
-
                 if hr_time.dim() > 1:
                     hr_time = hr_time.squeeze(-1)
-
                 if hr_freq.dim() > 1:
                     hr_freq = hr_freq.squeeze(-1)
 
-                # Original BL-PPG training loss
-                total_loss, loss_components = self.criterion(
-                    hr_pred,
-                    hr_time,
-                    hr_freq,
-                    hr,
-                )
+                total_loss, loss_components = self.criterion(hr_pred, hr_time, hr_freq, hr)
 
                 if training:
                     total_loss.backward()
-
                     if self.grad_clip_norm:
-                        nn.utils.clip_grad_norm_(
-                            self.model.parameters(),
-                            self.grad_clip_norm,
-                        )
-
+                        nn.utils.clip_grad_norm_(self.model.parameters(), self.grad_clip_norm)
                     self.optimizer.step()
 
-                # Save ALL predictions/targets for global test evaluation
-                if return_predictions:
-                    pred_true_pairs.append(
-                        (
-                            hr_pred.detach().cpu().numpy(),
-                            hr.detach().cpu().numpy(),
-                        )
-                    )
+                # Always collect — needed for global MAE/MSE/RMSE/R2/Pearson/Bias,
+                # not only when a caller wants the raw arrays back.
+                pred_true_pairs.append(
+                    (hr_pred.detach().cpu().numpy(), hr.detach().cpu().numpy())
+                )
 
             batch_size = ppg.size(0)
-
             total_loss_sum += total_loss.item() * batch_size
             total_count += batch_size
 
         if total_count == 0:
-            raise RuntimeError(
-                "Dataloader produced zero samples for this epoch"
-            )
+            raise RuntimeError("Dataloader produced zero samples for this epoch")
 
         avg_total_loss = total_loss_sum / total_count
 
-        # ---------------------------------------------------------
-        # Evaluation metrics
-        # ---------------------------------------------------------
-        if return_predictions and pred_true_pairs:
+        all_predictions = np.concatenate([p for p, t in pred_true_pairs])
+        all_true_values = np.concatenate([t for p, t in pred_true_pairs])
 
-            all_predictions = np.concatenate(
-                [p for p, t in pred_true_pairs]
-            )
-
-            all_true_values = np.concatenate(
-                [t for p, t in pred_true_pairs]
-            )
-
-            # EXACTLY the same calculation as TensorFlow code
-            evaluation_metrics = self._compute_metrics(
-                all_true_values,
-                all_predictions,
-            )
-
-            metrics = {
-                "mse": evaluation_metrics["MSE"],
-                "mae": evaluation_metrics["MAE"],
-                "rmse": evaluation_metrics["RMSE"],
-                "r2": evaluation_metrics["R2"],
-                "pearson_r": evaluation_metrics["Pearson_r"],
-                "mean_error": evaluation_metrics["Mean_Error"],
-                "total_loss": avg_total_loss,
-            }
-
-            return (
-                metrics,
-                all_predictions,
-                all_true_values,
-            )
-
-        # ---------------------------------------------------------
-        # Training / validation
-        # ---------------------------------------------------------
-        #
-        # Keep the original BL-PPG behavior for training and
-        # validation. These metrics are not used for the final
-        # TensorFlow-style test report.
-        #
-        # We calculate them globally here as well.
-        # ---------------------------------------------------------
-
-        all_predictions = []
-        all_true_values = []
-
-        # If predictions were not requested, we need one additional
-        # forward pass to calculate training/validation metrics.
-        self.model.eval()
-
-        with torch.no_grad():
-
-            for ppg, hr in loader:
-
-                ppg = ppg.to(self.device)
-                hr = hr.to(self.device)
-
-                model_output = self.model(ppg)
-
-                if isinstance(model_output, (tuple, list)):
-                    hr_pred = model_output[0]
-                else:
-                    hr_pred = model_output
-
-                if hr_pred.dim() > 1:
-                    hr_pred = hr_pred.squeeze(-1)
-
-                all_predictions.append(
-                    hr_pred.cpu().numpy()
-                )
-
-                all_true_values.append(
-                    hr.cpu().numpy()
-                )
-
-        all_predictions = np.concatenate(all_predictions)
-        all_true_values = np.concatenate(all_true_values)
-
-        evaluation_metrics = self._compute_metrics(
-            all_true_values,
-            all_predictions,
-        )
+        evaluation_metrics = self._compute_metrics(all_true_values, all_predictions)
 
         metrics = {
             "mse": evaluation_metrics["MSE"],
@@ -616,6 +542,9 @@ class Improved2BranchTrainer:
             "mean_error": evaluation_metrics["Mean_Error"],
             "total_loss": avg_total_loss,
         }
+
+        if return_predictions:
+            return metrics, all_predictions, all_true_values
 
         return metrics
 
@@ -670,10 +599,16 @@ class Improved2BranchTrainer:
                     "train_mse": train_metrics["mse"],
                     "train_mae": train_metrics["mae"],
                     "train_rmse": train_metrics["rmse"],
+                    "train_r2": train_metrics["r2"],
+                    "train_pearson_r": train_metrics["pearson_r"],
+                    "train_mean_error": train_metrics["mean_error"],
                     "train_total_loss": train_metrics["total_loss"],
                     "val_mse": val_metrics["mse"],
                     "val_mae": val_metrics["mae"],
                     "val_rmse": val_metrics["rmse"],
+                    "val_r2": val_metrics["r2"],
+                    "val_pearson_r": val_metrics["pearson_r"],
+                    "val_mean_error": val_metrics["mean_error"],
                     "val_total_loss": val_metrics["total_loss"],
                     "lr": self.optimizer.param_groups[0]["lr"],
                 })
@@ -682,6 +617,10 @@ class Improved2BranchTrainer:
                 self.writer.add_scalar("Loss/Val", val_metrics["mse"], epoch)
                 self.writer.add_scalar("Loss/Total/Train", train_metrics["total_loss"], epoch)
                 self.writer.add_scalar("Loss/Total/Val", val_metrics["total_loss"], epoch)
+                self.writer.add_scalar("R2/Train", train_metrics["r2"], epoch)
+                self.writer.add_scalar("R2/Val", val_metrics["r2"], epoch)
+                self.writer.add_scalar("Pearson/Train", train_metrics["pearson_r"], epoch)
+                self.writer.add_scalar("Pearson/Val", val_metrics["pearson_r"], epoch)
                 self.writer.add_scalar("LR", self.optimizer.param_groups[0]["lr"], epoch)
 
                 print(
@@ -689,11 +628,17 @@ class Improved2BranchTrainer:
                     f"Train -> MSE: {train_metrics['mse']:.4f} | "
                     f"RMSE: {train_metrics['rmse']:.4f} | "
                     f"MAE: {train_metrics['mae']:.4f} | "
+                    f"R2: {train_metrics['r2']:.4f} | "
+                    f"Pearson r: {train_metrics['pearson_r']:.4f} | "
+                    f"Bias: {train_metrics['mean_error']:.4f} | "
                     f"Total Loss: {train_metrics['total_loss']:.4f}\n"
                     f"          | "
                     f"Val   -> MSE: {val_metrics['mse']:.4f} | "
                     f"RMSE: {val_metrics['rmse']:.4f} | "
                     f"MAE: {val_metrics['mae']:.4f} | "
+                    f"R2: {val_metrics['r2']:.4f} | "
+                    f"Pearson r: {val_metrics['pearson_r']:.4f} | "
+                    f"Bias: {val_metrics['mean_error']:.4f} | "
                     f"Total Loss: {val_metrics['total_loss']:.4f}"
                 )
 
@@ -724,43 +669,23 @@ class Improved2BranchTrainer:
         return history
 
     def test(self, save_plot=True, save_report=True):
-        """
-        Evaluate on the held-out test set.
+        """Evaluate on the held-out test set — the number to report, computed
+        exactly like the TensorFlow evaluation code (MAE, MSE, RMSE, R2,
+        Pearson r, Bias/Mean Error), globally over the full test set.
 
-        Metrics are calculated exactly like the TensorFlow evaluation code:
-            MAE
-            MSE
-            RMSE
-            R2
-            Pearson R
-            Bias / Mean Error
-        """
-
+        In `train_and_test` mode, reloads `best_model.pth` first (independent
+        of whatever weights are in memory); in `only_test` mode, scores
+        whatever weights were already loaded from `config.model_path`."""
         if self.mode == "train_and_test":
-
-            best_ckpt_path = os.path.join(
-                self.model_dir,
-                "best_model.pth",
-            )
-
+            best_ckpt_path = os.path.join(self.model_dir, "best_model.pth")
             if os.path.exists(best_ckpt_path):
-
-                self._load_model_weights(
-                    best_ckpt_path
-                )
-
-                print(
-                    f"[test] Loaded best checkpoint from "
-                    f"{best_ckpt_path}"
-                )
+                self._load_model_weights(best_ckpt_path)
+                print(f"[test] Loaded best checkpoint from {best_ckpt_path}")
 
         metrics, predictions, true_values = self._run_epoch(
-            self.test_loader,
-            training=False,
-            return_predictions=True,
+            self.test_loader, training=False, return_predictions=True
         )
 
-        # Print EXACTLY like TensorFlow evaluation
         self._print_metrics(
             "Improved2Branch",
             {
@@ -774,27 +699,10 @@ class Improved2BranchTrainer:
         )
 
         if save_plot:
-
-            os.makedirs(
-                self.model_dir,
-                exist_ok=True,
-            )
-
-            plot_path = os.path.join(
-                self.model_dir,
-                "eval_predictions_test.png",
-            )
-
-            plot_prediction(
-                predictions,
-                true_values,
-                save_path=plot_path,
-            )
-
-            print(
-                f"[test] Prediction plot saved to "
-                f"{plot_path}"
-            )
+            os.makedirs(self.model_dir, exist_ok=True)
+            plot_path = os.path.join(self.model_dir, "eval_predictions_test.png")
+            plot_prediction(predictions, true_values, save_path=plot_path)
+            print(f"[test] Prediction plot saved to {plot_path}")
 
         if save_report:
             self._save_final_report(metrics)
