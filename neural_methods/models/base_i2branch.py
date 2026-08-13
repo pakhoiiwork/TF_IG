@@ -467,7 +467,7 @@ class FrequencyDomainBranch(nn.Module):
                 in_channels,
                 mid_channels,
                 kernel_size=7,
-                padding=1,
+                padding=3,
                 bias=False,
             ),
             nn.BatchNorm2d(mid_channels),
