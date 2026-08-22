@@ -8,9 +8,6 @@ from neural_methods.models.baseline_2branch import Baseline2Branch
 from neural_methods.models.base_i2branch import Improved2Branch
 
 models = {
-    # "base": BaselineModel,
-    # "base_trans": BaselineTransformer,
-    # "base_2branch": Baseline2Branch,
     "base_i2branch": Improved2Branch,
 }
 
