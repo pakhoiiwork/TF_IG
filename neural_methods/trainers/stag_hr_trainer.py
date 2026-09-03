@@ -9,6 +9,7 @@ class StagHrTrainer(BaseTrainer):
         return f"improved_2branch_{self.config.dataset_name}"
 
     def _build_model(self):
+        # [DUAL-RATE-DESIGN] Native dataset sampling rate is intentionally kept here.
         return Improved2Branch(sampling_rate=self.sampling_rate)
 
     def _forward_step(self, ppg, hr):
