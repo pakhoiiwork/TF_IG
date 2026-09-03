@@ -227,6 +227,10 @@ class FrequencyDomainBranch(nn.Module):
 
     Input:  (B, D)
     Output: features (B, C), attention (B, F, T)
+
+    # [DUAL-RATE-DESIGN] `sampling_rate` intentionally stays at the dataset-native
+    # acquisition rate; the model input length is derived separately in
+    # utils/preprocessing_config.py under the dual-rate preprocessing design.
     """
 
     def __init__(self, sampling_rate, in_channels=1, out_channels=64,

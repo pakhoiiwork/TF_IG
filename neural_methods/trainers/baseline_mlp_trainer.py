@@ -9,7 +9,8 @@ class BaselineMlpTrainer(BaseTrainer):
         return f"baseline_{self.config.dataset_name}"
 
     def _build_model(self):
-        return BaselineModel(self.config)
+        # [DUAL-RATE-DESIGN] Build the MLP from the derived input_dim, not the removed config knob.
+        return BaselineModel(self.config, input_dim=self.input_dim)
 
     def _forward_step(self, ppg, hr):
         """Single-output forward: model returns (B,) predictions directly."""

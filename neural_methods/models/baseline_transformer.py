@@ -79,10 +79,17 @@ class RegressionHead(nn.Module):
 class BaselineTransformer(nn.Module):
     """Patch-based transformer baseline for PPG → HR estimation."""
 
-    def __init__(self, config):
+    def __init__(self, config, input_dim=None):
         super().__init__()
-        input_dim = config.input_dim
+        input_dim = input_dim if input_dim is not None else getattr(config, "input_dim", None)  # [DUAL-RATE-DESIGN]
+        if input_dim is None:
+            raise ValueError("BaselineTransformer requires an input_dim; it is derived in BaseTrainer via utils/preprocessing_config.py.")
         patch_size = getattr(config, "patch_size", 25)
+        if input_dim % patch_size != 0:
+            raise ValueError(
+                f"[DUAL-RATE-DESIGN] Derived input_dim={input_dim} is not divisible by patch_size={patch_size}; "
+                "this would break the transformer patch embedding."
+            )
         d_model = getattr(config, "d_model", 128)
         num_heads = getattr(config, "num_heads", 2)
         ffn_dim = getattr(config, "ffn_dim", 256)

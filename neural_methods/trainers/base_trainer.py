@@ -19,6 +19,7 @@ from torch.utils.tensorboard import SummaryWriter
 from data_handler.bidmc_hanlder import BIDMC_Handler
 from data_handler.capnobase_handler import CAPNOBASE_Handler
 from utils.plot_prediction import plot_prediction
+from utils.preprocessing_config import TARGET_SAMPLING_RATE_HZ, derive_input_dim
 
 
 def set_seed(seed: int) -> None:
@@ -77,8 +78,11 @@ class BaseTrainer(ABC):
     def __init__(self, config):
         self.config = config
         self.mode = getattr(config, "mode", "train_and_test")
+        self.input_dim = derive_input_dim(self.config.window_size)  # [DUAL-RATE-DESIGN]
 
         set_seed(getattr(config, "seed", 42))
+
+        assert derive_input_dim(16) == 1000  # [DUAL-RATE-DESIGN]
 
         self.model_dir = os.path.join("pretrained_models", self._model_dir_name())
 
@@ -224,19 +228,29 @@ class BaseTrainer(ABC):
         return train_subjects, val_subjects, test_subjects
 
     def _save_split_info(self, train_subjects, val_subjects, test_subjects):
-        """Persist subject split to split_info.json for reproducibility."""
+        """Persist subject split and preprocessing metadata for reproducibility."""
         info = {
             "seed": self.config.seed,
             "train_subjects": sorted(train_subjects),
             "val_subjects": sorted(val_subjects),
             "test_subjects": sorted(test_subjects),
         }
+        preprocessing_info = {
+            "window_size_seconds": self.config.window_size,
+            "target_sampling_rate_hz": TARGET_SAMPLING_RATE_HZ,
+            "input_dim": self.input_dim,
+            "native_sampling_rate_hz": self.sampling_rate,
+        }
         try:
             os.makedirs(self.model_dir, exist_ok=True)
             path = os.path.join(self.model_dir, "split_info.json")
             with open(path, "w", encoding="utf-8") as f:
                 json.dump(info, f, indent=2)
+            preprocessing_path = os.path.join(self.model_dir, "preprocessing_config.json")
+            with open(preprocessing_path, "w", encoding="utf-8") as f:
+                json.dump(preprocessing_info, f, indent=2)
             print(f"[split] Subject split saved to {path}")
+            print(f"[split] Preprocessing config saved to {preprocessing_path}")
         except OSError as e:
             print(f"[split] Warning: could not save split_info.json ({e})")
 
@@ -314,11 +328,13 @@ class BaseTrainer(ABC):
         In only_test mode, requires an existing split_info.json to guarantee
         test subjects match the split used during training.
         """
+        # [DUAL-RATE-DESIGN] input_dim is derived, not user-configured — see utils/preprocessing_config.py
         records = self._load_records()
         if not records:
             raise ValueError("No processed records were produced from the dataset")
 
         fs = records[0]["sampling_rate"]
+        self.sampling_rate = fs
 
         split_info = None
         if self.mode == "only_test":
@@ -336,15 +352,15 @@ class BaseTrainer(ABC):
 
         num_workers = getattr(self.config, "num_workers", 0)
         train_loader = DataLoader(
-            PPGWindowDataset(train_records, self.config.input_dim),
+            PPGWindowDataset(train_records, self.input_dim),
             batch_size=self.config.batch_size, shuffle=True, num_workers=num_workers,
         )
         val_loader = DataLoader(
-            PPGWindowDataset(val_records, self.config.input_dim),
+            PPGWindowDataset(val_records, self.input_dim),
             batch_size=self.config.batch_size, shuffle=False, num_workers=num_workers,
         )
         test_loader = DataLoader(
-            PPGWindowDataset(test_records, self.config.input_dim),
+            PPGWindowDataset(test_records, self.input_dim),
             batch_size=self.config.batch_size, shuffle=False, num_workers=num_workers,
         )
         return train_loader, val_loader, test_loader, fs
