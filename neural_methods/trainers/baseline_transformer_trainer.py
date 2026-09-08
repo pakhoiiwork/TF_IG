@@ -9,7 +9,6 @@ class BaselineTransformerTrainer(BaseTrainer):
         return f"baseline_transformer_{self.config.dataset_name}"
 
     def _build_model(self):
-        # [DUAL-RATE-DESIGN] Base transformer must receive the derived input_dim for patch math.
         return BaselineTransformer(self.config, input_dim=self.input_dim)
 
     def _forward_step(self, ppg, hr):

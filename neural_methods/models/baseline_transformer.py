@@ -81,13 +81,13 @@ class BaselineTransformer(nn.Module):
 
     def __init__(self, config, input_dim=None):
         super().__init__()
-        input_dim = input_dim if input_dim is not None else getattr(config, "input_dim", None)  # [DUAL-RATE-DESIGN]
+        input_dim = input_dim if input_dim is not None else getattr(config, "input_dim", None)
         if input_dim is None:
             raise ValueError("BaselineTransformer requires an input_dim; it is derived in BaseTrainer via utils/preprocessing_config.py.")
         patch_size = getattr(config, "patch_size", 25)
         if input_dim % patch_size != 0:
             raise ValueError(
-                f"[DUAL-RATE-DESIGN] Derived input_dim={input_dim} is not divisible by patch_size={patch_size}; "
+                f"Derived input_dim={input_dim} is not divisible by patch_size={patch_size}; "
                 "this would break the transformer patch embedding."
             )
         d_model = getattr(config, "d_model", 128)

@@ -3,9 +3,9 @@ data_path: datasets/bidmc-ppg-and-respiration-dataset-1.0.0/bidmc_csv
 
 # --- Shared training hyperparameters ---
 training:
-  batch_size: 80
+  batch_size: 128
   epochs: 150
-  lr: 0.001
+  lr: 0.003
   lr_patience: 8
   lr_scheduler: plateau
   weight_decay: 0.0001
@@ -17,9 +17,6 @@ training:
 
 # --- Data processing ---
 data:
-  # [DUAL-RATE-DESIGN] input_dim is no longer configured here — it is derived from window_size
-  # under the dual-rate preprocessing design.
-  # See utils/preprocessing_config.py for the full rationale.
   window_size: 16
   window_shift: 2
   val_split: 0.2
