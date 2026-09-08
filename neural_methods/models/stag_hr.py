@@ -228,9 +228,6 @@ class FrequencyDomainBranch(nn.Module):
     Input:  (B, D)
     Output: features (B, C), attention (B, F, T)
 
-    # [DUAL-RATE-DESIGN] `sampling_rate` intentionally stays at the dataset-native
-    # acquisition rate; the model input length is derived separately in
-    # utils/preprocessing_config.py under the dual-rate preprocessing design.
     """
 
     def __init__(self, sampling_rate, in_channels=1, out_channels=64,
@@ -361,12 +358,8 @@ class RegressionHead(nn.Module):
 # ============================================================
 
 class Improved2Branch(nn.Module):
-    """STAG-HR: Lightweight dual-branch PPG heart rate estimation model.
-
-    Improvements over Baseline2Branch:
-        V1: GAP → learned temporal attention pooling
-        V2: Concatenation fusion → interaction + gated fusion
-        V4: Frequency averaging → joint spectro-temporal attention
+    """
+        STAG-HR: Lightweight dual-branch PPG heart rate estimation model.
     """
 
     def __init__(self, in_channels=1, out_channels=64, sampling_rate=125):

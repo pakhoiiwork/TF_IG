@@ -19,7 +19,11 @@ from torch.utils.tensorboard import SummaryWriter
 from data_handler.bidmc_hanlder import BIDMC_Handler
 from data_handler.capnobase_handler import CAPNOBASE_Handler
 from utils.plot_prediction import plot_prediction
-from utils.preprocessing_config import TARGET_SAMPLING_RATE_HZ, derive_input_dim
+from utils.preprocessing_config import (
+    TARGET_SAMPLING_RATE_FRACTION,
+    derive_input_dim,
+    derive_target_sampling_rate,
+)
 
 
 def set_seed(seed: int) -> None:
@@ -78,13 +82,11 @@ class BaseTrainer(ABC):
     def __init__(self, config):
         self.config = config
         self.mode = getattr(config, "mode", "train_and_test")
-        self.input_dim = derive_input_dim(self.config.window_size)  # [DUAL-RATE-DESIGN]
-
         set_seed(getattr(config, "seed", 42))
 
-        assert derive_input_dim(16) == 1000  # [DUAL-RATE-DESIGN]
-
         self.model_dir = os.path.join("pretrained_models", self._model_dir_name())
+        self.reports_dir = os.path.join(self.model_dir, "reports")
+        os.makedirs(self.reports_dir, exist_ok=True)
 
         self.train_loader, self.val_loader, self.test_loader, self.sampling_rate = (
             self._build_dataloaders()
@@ -118,7 +120,7 @@ class BaseTrainer(ABC):
 
             self.writer = SummaryWriter(log_dir=os.path.join(self.model_dir, "logs"))
             self.best_val_rmse = float("inf")
-            self.history_path = os.path.join(self.model_dir, "history.json")
+            self.history_path = os.path.join(self.reports_dir, "history.json")
 
         elif self.mode == "only_test":
             model_path = getattr(config, "model_path", "")
@@ -237,16 +239,16 @@ class BaseTrainer(ABC):
         }
         preprocessing_info = {
             "window_size_seconds": self.config.window_size,
-            "target_sampling_rate_hz": TARGET_SAMPLING_RATE_HZ,
+            "target_sampling_rate_fraction": TARGET_SAMPLING_RATE_FRACTION,
+            "target_sampling_rate_hz": derive_target_sampling_rate(self.sampling_rate),
             "input_dim": self.input_dim,
             "native_sampling_rate_hz": self.sampling_rate,
         }
         try:
-            os.makedirs(self.model_dir, exist_ok=True)
-            path = os.path.join(self.model_dir, "split_info.json")
+            path = os.path.join(self.reports_dir, "split_info.json")
             with open(path, "w", encoding="utf-8") as f:
                 json.dump(info, f, indent=2)
-            preprocessing_path = os.path.join(self.model_dir, "preprocessing_config.json")
+            preprocessing_path = os.path.join(self.reports_dir, "preprocessing_config.json")
             with open(preprocessing_path, "w", encoding="utf-8") as f:
                 json.dump(preprocessing_info, f, indent=2)
             print(f"[split] Subject split saved to {path}")
@@ -255,7 +257,7 @@ class BaseTrainer(ABC):
             print(f"[split] Warning: could not save split_info.json ({e})")
 
     def _split_info_path(self):
-        return os.path.join(self.model_dir, "split_info.json")
+        return os.path.join(self.reports_dir, "split_info.json")
 
     def _load_split_info(self):
         """Load a previously saved subject split, if valid."""
@@ -328,13 +330,13 @@ class BaseTrainer(ABC):
         In only_test mode, requires an existing split_info.json to guarantee
         test subjects match the split used during training.
         """
-        # [DUAL-RATE-DESIGN] input_dim is derived, not user-configured — see utils/preprocessing_config.py
         records = self._load_records()
         if not records:
             raise ValueError("No processed records were produced from the dataset")
 
         fs = records[0]["sampling_rate"]
         self.sampling_rate = fs
+        self.input_dim = derive_input_dim(self.config.window_size, fs)
 
         split_info = None
         if self.mode == "only_test":
@@ -397,10 +399,14 @@ class BaseTrainer(ABC):
         )
 
         mean_error = float(np.mean(y_pred - y_true))
+        accuracy_within_3bpm = float(np.mean(np.abs(y_pred - y_true) <= 3.0))
+        accuracy_within_5bpm = float(np.mean(np.abs(y_pred - y_true) <= 5.0))
 
         return {
             "MAE": mae, "MSE": mse, "RMSE": rmse,
             "R2": r2, "Pearson_r": pearson_r, "Mean_Error": mean_error,
+            "Accuracy_within_3bpm": accuracy_within_3bpm,
+            "Accuracy_within_5bpm": accuracy_within_5bpm,
         }
 
     @staticmethod
@@ -411,7 +417,9 @@ class BaseTrainer(ABC):
             f"MAE: {metrics['MAE']:.4f} | MSE: {metrics['MSE']:.4f} | "
             f"RMSE: {metrics['RMSE']:.4f} | R2: {metrics['R2']:.4f} | "
             f"Pearson r: {metrics['Pearson_r']:.4f} | "
-            f"Bias: {metrics['Mean_Error']:.4f}"
+            f"Bias: {metrics['Mean_Error']:.4f} | "
+            f"Acc <=3 BPM: {metrics['Accuracy_within_3bpm']:.4f} | "
+            f"Acc <=5 BPM: {metrics['Accuracy_within_5bpm']:.4f}"
         )
 
     # ------------------------------------------------------------------
@@ -475,6 +483,8 @@ class BaseTrainer(ABC):
             "r2": eval_metrics["R2"],
             "pearson_r": eval_metrics["Pearson_r"],
             "mean_error": eval_metrics["Mean_Error"],
+            "accuracy_within_3bpm": eval_metrics["Accuracy_within_3bpm"],
+            "accuracy_within_5bpm": eval_metrics["Accuracy_within_5bpm"],
             "loss": total_loss_sum / total_count,
         }
 
@@ -541,6 +551,8 @@ class BaseTrainer(ABC):
                     "train_r2": train_metrics["r2"],
                     "train_pearson_r": train_metrics["pearson_r"],
                     "train_mean_error": train_metrics["mean_error"],
+                    "train_accuracy_within_3bpm": train_metrics["accuracy_within_3bpm"],
+                    "train_accuracy_within_5bpm": train_metrics["accuracy_within_5bpm"],
                     "train_loss": train_metrics["loss"],
                     "val_mse": val_metrics["mse"],
                     "val_mae": val_metrics["mae"],
@@ -548,6 +560,8 @@ class BaseTrainer(ABC):
                     "val_r2": val_metrics["r2"],
                     "val_pearson_r": val_metrics["pearson_r"],
                     "val_mean_error": val_metrics["mean_error"],
+                    "val_accuracy_within_3bpm": val_metrics["accuracy_within_3bpm"],
+                    "val_accuracy_within_5bpm": val_metrics["accuracy_within_5bpm"],
                     "val_loss": val_metrics["loss"],
                     "lr": self.optimizer.param_groups[0]["lr"],
                 })
@@ -563,19 +577,8 @@ class BaseTrainer(ABC):
 
                 print(
                     f"Epoch {epoch:03d} | "
-                    f"Train -> MSE: {train_metrics['mse']:.4f} | "
-                    f"RMSE: {train_metrics['rmse']:.4f} | "
-                    f"MAE: {train_metrics['mae']:.4f} | "
-                    f"R2: {train_metrics['r2']:.4f} | "
-                    f"Pearson r: {train_metrics['pearson_r']:.4f} | "
-                    f"Bias: {train_metrics['mean_error']:.4f}\n"
-                    f"          | "
-                    f"Val   -> MSE: {val_metrics['mse']:.4f} | "
-                    f"RMSE: {val_metrics['rmse']:.4f} | "
-                    f"MAE: {val_metrics['mae']:.4f} | "
-                    f"R2: {val_metrics['r2']:.4f} | "
-                    f"Pearson r: {val_metrics['pearson_r']:.4f} | "
-                    f"Bias: {val_metrics['mean_error']:.4f}"
+                    f"Train loss: {train_metrics['loss']:.4f} | "
+                    f"Val loss: {val_metrics['loss']:.4f}"
                 )
 
                 if val_metrics["rmse"] < self.best_val_rmse:
@@ -583,7 +586,10 @@ class BaseTrainer(ABC):
                     epochs_without_improvement = 0
                     best_ckpt_path = os.path.join(self.model_dir, "best_model.pth")
                     self._save_checkpoint(epoch, train_metrics, val_metrics, best_ckpt_path)
-                    print(f"          | New best (val RMSE: {self.best_val_rmse:.4f}) -> {best_ckpt_path}")
+                    print(
+                        f"          | New best epoch {epoch} "
+                        f"(val RMSE: {self.best_val_rmse:.4f}) -> {best_ckpt_path}"
+                    )
                 else:
                     epochs_without_improvement += 1
 
@@ -626,6 +632,8 @@ class BaseTrainer(ABC):
                 "MAE": metrics["mae"], "MSE": metrics["mse"],
                 "RMSE": metrics["rmse"], "R2": metrics["r2"],
                 "Pearson_r": metrics["pearson_r"], "Mean_Error": metrics["mean_error"],
+                "Accuracy_within_3bpm": metrics["accuracy_within_3bpm"],
+                "Accuracy_within_5bpm": metrics["accuracy_within_5bpm"],
             },
         )
 
@@ -647,7 +655,7 @@ class BaseTrainer(ABC):
             report["best_val_rmse"] = self.best_val_rmse
         try:
             os.makedirs(self.model_dir, exist_ok=True)
-            report_path = os.path.join(self.model_dir, "test_report.json")
+            report_path = os.path.join(self.reports_dir, "test_report.json")
             with open(report_path, "w", encoding="utf-8") as f:
                 json.dump(report, f, indent=2)
             print(f"[report] Test report saved to {report_path}")
