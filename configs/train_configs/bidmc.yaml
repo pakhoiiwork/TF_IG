@@ -5,7 +5,7 @@ data_path: datasets/bidmc-ppg-and-respiration-dataset-1.0.0/bidmc_csv
 training:
   batch_size: 128
   epochs: 150
-  lr: 0.003
+  lr: 0.007
   lr_patience: 8
   lr_scheduler: plateau
   weight_decay: 0.0001
