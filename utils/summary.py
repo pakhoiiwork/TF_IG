@@ -1,4 +1,4 @@
-"""Profile STAG-HR models with the same batch-1 protocol as MEDVSE."""
+"""Profile PyTorch models with the reproducible paper benchmark protocol."""
 
 import argparse
 import time
@@ -37,7 +37,7 @@ def _model_size_bytes(model):
 
 
 def _profile_flops(model, sample):
-    """Count profiler FLOPs; each MAC is reported separately as FLOPs / 2."""
+    """Return the PyTorch profiler's framework-specific FLOP estimate."""
     with torch.profiler.profile(activities=[torch.profiler.ProfilerActivity.CPU],
                                 record_shapes=False, with_flops=True) as profiler:
         model(sample)
@@ -81,10 +81,14 @@ def _print_summary(name, checkpoint=None, sequence_length=1875,
         flops, macs = _profile_flops(model, sample)
         peak_memory = _peak_memory(model, sample, device)
         latency_ms, throughput = _benchmark(model, sample, warmup, repeats, device)
-    params = sum(p.numel() for p in model.parameters())
-    print(f"\n{name} (input=[1, {sequence_length}], device={device})")
-    print(f"Params: {params:,}")
-    print(f"FLOPs: {flops:,}")
+    trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    total_params = sum(t.numel() for t in model.state_dict().values())
+    non_trainable = total_params - trainable
+    print(f"\n{name} (device={device}, threads=1, input_samples={sequence_length}, batch=1)")
+    print(f"Trainable params: {trainable:,}")
+    print(f"Non-trainable params: {non_trainable:,}")
+    print(f"Total params: {total_params:,}")
+    print(f"FLOPs (PyTorch estimate): {flops:,}")
     print(f"MACs: {macs:,}")
     print(f"Model size (MB): {_model_size_bytes(model) / (1024 ** 2):.3f}")
     print(f"Peak memory (MB): {peak_memory:.3f}" if peak_memory is not None else "Peak memory (MB): unavailable (CPU)")
@@ -101,8 +105,13 @@ def main():
     parser.add_argument("--sampling-rate", type=int, default=125)
     parser.add_argument("--warmup", type=int, default=10)
     parser.add_argument("--repeats", type=int, default=50)
-    parser.add_argument("--device", default=None)
+    parser.add_argument("--device", default="cpu",
+                        help="Benchmark device (default: cpu).")
+    parser.add_argument("--threads", type=int, default=1,
+                        help="PyTorch intra-op thread count (default: 1).")
     args = parser.parse_args()
+    torch.set_num_threads(args.threads)
+    torch.set_num_interop_threads(args.threads)
     names = [args.model] if args.model else ["base", "base_trans", "base_2branch", "base_i2branch"]
     for name in names:
         _print_summary(name, args.checkpoint if args.model else None,
