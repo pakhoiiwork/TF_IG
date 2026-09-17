@@ -15,7 +15,7 @@ training:
   model_path: "pretrained_models/baseline_bidmc/best_model.pth"
 
 data:
-  window_size: 16
+  window_size: 30
   window_shift: 2
   val_split: 0.2
   test_split: 0.2
