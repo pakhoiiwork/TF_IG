@@ -1,1 +1,1 @@
-conda create -n artrmv python=3.11
+conda create -n tfig python=3.11.15

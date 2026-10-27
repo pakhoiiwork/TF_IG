@@ -1,0 +1,2 @@
+training_config: configs/common/training.yaml
+dataset_config: configs/datasets/bidmc.yaml

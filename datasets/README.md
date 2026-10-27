@@ -97,4 +97,3 @@ datasets/
 
 - The loaders in `data_handler/bidmc_hanlder.py` and `data_handler/capnobase_handler.py` assume the directory names shown above.
 - If you change the dataset layout, update the loader paths and the test paths in `test_handlers.py` at the same time.
-- The repository also contains an archived `IEEEE Signal Processing Cup-2015/` folder, which is separate from the BIDMC and CapnoBase pipelines.

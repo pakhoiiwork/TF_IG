@@ -1,0 +1,7 @@
+{
+  "window_size_seconds": 30,
+  "target_sampling_rate_fraction": 0.5,
+  "target_sampling_rate_hz": 62.5,
+  "input_dim": 1875,
+  "native_sampling_rate_hz": 125
+}

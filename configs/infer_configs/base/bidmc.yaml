@@ -1,0 +1,40 @@
+dataset_name: bidmc
+data_path: datasets/bidmc-ppg-and-respiration-dataset-1.0.0/bidmc_csv
+
+training:
+  batch_size: 128
+  epochs: 150
+  lr: 0.003
+  lr_patience: 8
+  lr_scheduler: plateau
+  weight_decay: 0.0001
+  seed: 36
+  num_workers: 4
+  only_save_best_model: true
+  mode: "only_test"
+  model_path: "pretrained_models/baseline_bidmc/best_model.pth"
+
+data:
+  window_size: 30
+  window_shift: 2
+  val_split: 0.2
+  test_split: 0.2
+
+models:
+  base:
+    hidden_dim1: 512
+    hidden_dim2: 256
+    hidden_dim3: 64
+    output_dim: 1
+
+  base_trans:
+    patch_size: 25
+    d_model: 128
+    num_heads: 2
+    ffn_dim: 256
+    num_layers: 2
+    output_dim: 1
+
+  tf_ig:
+    in_channels: 1
+    out_channels: 64
