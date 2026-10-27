@@ -88,7 +88,7 @@ class CAPNOBASE_Handler:
 
                 win_hr = hr_values[(hr_time >= start_time) & (hr_time < end_time)] if hr_time is not None else hr_values[start_time:end_time]
                 win_ppg = ppg_signal[start_idx:end_idx]
-                win_ppg = bandpass_filter(win_ppg, lowcut=0.5, highcut=5.0, fs=self.sampling_rate, order=4)
+                win_ppg = bandpass_filter(win_ppg, lowcut=0.5, highcut=5.0, fs=sampling_rate, order=4)
                 win_ppg = (
                     win_ppg - np.mean(win_ppg)
                 ) / (np.std(win_ppg) + self.eps)  # Normalize PPG window

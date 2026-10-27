@@ -1,0 +1,6 @@
+patch_size: 25
+d_model: 128
+num_heads: 2
+ffn_dim: 256
+num_layers: 2
+output_dim: 1

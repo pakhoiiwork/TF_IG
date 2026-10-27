@@ -1,0 +1,2 @@
+output_root: pretrained_models
+device: auto

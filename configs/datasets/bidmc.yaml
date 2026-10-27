@@ -1,0 +1,6 @@
+dataset_name: bidmc
+data_path: datasets/bidmc-ppg-and-respiration-dataset-1.0.0/bidmc_csv
+window_size: 30
+window_shift: 2
+val_split: 0.2
+test_split: 0.2

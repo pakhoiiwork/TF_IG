@@ -1,0 +1,6 @@
+dataset_name: capnobase
+data_path: datasets/CapnoBase/data/csv
+window_size: 16
+window_shift: 2
+val_split: 0.2
+test_split: 0.2

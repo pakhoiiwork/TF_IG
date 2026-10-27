@@ -10,10 +10,9 @@ import torch
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from neural_methods.models.baseline_2branch import Baseline2Branch
 from neural_methods.models.baseline_mlp import BaselineModel
 from neural_methods.models.baseline_transformer import BaselineTransformer
-from neural_methods.models.stag_hr import Improved2Branch
+from neural_methods.models.tf_ig import TF_IG
 
 
 def _make_model(name, sequence_length, sampling_rate):
@@ -25,11 +24,8 @@ def _make_model(name, sequence_length, sampling_rate):
         config = argparse.Namespace(patch_size=25, d_model=128, num_heads=2,
                                     ffn_dim=256, num_layers=2, output_dim=1)
         return BaselineTransformer(config, input_dim=sequence_length)
-    if name == "base_2branch":
-        return Baseline2Branch(in_channels=1, out_channels=64,
-                               sampling_rate=sampling_rate)
-    return Improved2Branch(in_channels=1, out_channels=64,
-                           sampling_rate=sampling_rate)
+    return TF_IG(in_channels=1, out_channels=64,
+                 sampling_rate=sampling_rate)
 
 
 def _model_size_bytes(model):
@@ -98,7 +94,7 @@ def _print_summary(name, checkpoint=None, sequence_length=1875,
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--model", choices=("base", "base_trans", "base_2branch", "base_i2branch"))
+    parser.add_argument("--model", choices=("base", "base_trans", "tf_ig"))
     parser.add_argument("--checkpoint", type=Path)
     parser.add_argument("--sequence-length", type=int, default=1875,
                         help="Resampled BIDMC input length (30 s * 125 Hz * 0.5).")
@@ -112,7 +108,7 @@ def main():
     args = parser.parse_args()
     torch.set_num_threads(args.threads)
     torch.set_num_interop_threads(args.threads)
-    names = [args.model] if args.model else ["base", "base_trans", "base_2branch", "base_i2branch"]
+    names = [args.model] if args.model else ["base", "base_trans", "tf_ig"]
     for name in names:
         _print_summary(name, args.checkpoint if args.model else None,
                        args.sequence_length, args.sampling_rate, args.warmup,

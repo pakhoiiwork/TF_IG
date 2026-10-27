@@ -35,10 +35,6 @@ models:
     num_layers: 2
     output_dim: 1
 
-  base_2branch:
-    in_channels: 1
-    out_channels: 64
-
-  base_i2branch:
+  tf_ig:
     in_channels: 1
     out_channels: 64

@@ -357,9 +357,9 @@ class RegressionHead(nn.Module):
 # Final Model
 # ============================================================
 
-class Improved2Branch(nn.Module):
+class TF_IG(nn.Module):
     """
-        STAG-HR: Lightweight dual-branch PPG heart rate estimation model.
+        TF-IG: Lightweight dual-branch PPG heart rate estimation model.
     """
 
     def __init__(self, in_channels=1, out_channels=64, sampling_rate=125):

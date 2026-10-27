@@ -16,9 +16,9 @@ import torch.nn as nn
 from torch.utils.data import DataLoader, Dataset
 from torch.utils.tensorboard import SummaryWriter
 
-from data_handler.bidmc_hanlder import BIDMC_Handler
-from data_handler.capnobase_handler import CAPNOBASE_Handler
-from utils.plot_prediction import plot_prediction
+from data_handler.registry import create_handler
+from data_handler.splitters import split_subjects
+from utils.plotting import plot_prediction
 from utils.preprocessing_config import (
     TARGET_SAMPLING_RATE_FRACTION,
     derive_input_dim,
@@ -163,18 +163,14 @@ class BaseTrainer(ABC):
     # Data loading & subject-level splitting
     # ------------------------------------------------------------------
 
-    def _get_handler(self):
-        """Return the dataset handler for `config.dataset_name`."""
-        dataset_name = self.config.dataset_name.lower()
-        if dataset_name == "bidmc":
-            return BIDMC_Handler(self.config.data_path)
-        if dataset_name == "capnobase":
-            return CAPNOBASE_Handler(self.config.data_path)
-        raise ValueError(f"Unsupported dataset: {self.config.dataset_name}")
+    def _get_handler(self, dataset_name=None, data_path=None):
+        dataset_name = dataset_name or self.config.dataset_name
+        data_path = data_path or self.config.data_path
+        return create_handler(dataset_name, data_path)
 
-    def _load_records(self):
+    def _load_records(self, dataset_name=None, data_path=None):
         """Load windowed data, dropping windows with missing/NaN HR labels."""
-        handler = self._get_handler()
+        handler = self._get_handler(dataset_name, data_path)
         handler.get_raw_data_from_csv()
         records = handler.process_data(
             window_size=self.config.window_size,
@@ -206,37 +202,21 @@ class BaseTrainer(ABC):
                 f"Need at least 3 subjects for train/val/test split; found {n}."
             )
 
-        rng = random.Random(self.config.seed)
-        shuffled = subject_ids[:]
-        rng.shuffle(shuffled)
-
-        n_val = max(1, round(n * val_split))
-        n_test = max(1, round(n * test_split))
-
-        while n_val + n_test >= n:
-            if n_val >= n_test:
-                n_val -= 1
-            else:
-                n_test -= 1
-            if n_val < 1 or n_test < 1:
-                raise ValueError(
-                    f"Not enough subjects ({n}) for non-empty train/val/test splits "
-                    f"with val_split={val_split}, test_split={test_split}."
-                )
-
-        test_subjects = set(shuffled[:n_test])
-        val_subjects = set(shuffled[n_test:n_test + n_val])
-        train_subjects = set(shuffled[n_test + n_val:])
-        return train_subjects, val_subjects, test_subjects
+        return split_subjects(subject_ids, self.config.seed, val_split, test_split)
 
     def _save_split_info(self, train_subjects, val_subjects, test_subjects):
         """Persist subject split and preprocessing metadata for reproducibility."""
         info = {
             "seed": self.config.seed,
+            "protocol": getattr(self.config, "evaluation_protocol", "intra_dataset"),
+            "train_dataset": self.config.dataset_name,
             "train_subjects": sorted(train_subjects),
             "val_subjects": sorted(val_subjects),
             "test_subjects": sorted(test_subjects),
         }
+        test_dataset_name = getattr(self.config, "test_dataset_name", None)
+        if test_dataset_name:
+            info["test_dataset"] = test_dataset_name
         preprocessing_info = {
             "window_size_seconds": self.config.window_size,
             "target_sampling_rate_fraction": TARGET_SAMPLING_RATE_FRACTION,
@@ -348,9 +328,22 @@ class BaseTrainer(ABC):
                     "Refusing to generate a fresh split."
                 )
 
-        train_records, val_records, test_records = self._split_by_subject(
-            records, split_info=split_info
-        )
+        protocol = getattr(self.config, "evaluation_protocol", "intra_dataset")
+        if protocol == "cross_dataset":
+            test_dataset_name = getattr(self.config, "test_dataset_name", None)
+            test_data_path = getattr(self.config, "test_data_path", None)
+            if not test_dataset_name or not test_data_path:
+                raise ValueError(
+                    "cross_dataset evaluation requires test_dataset_name and test_data_path"
+                )
+            test_records = self._load_records(test_dataset_name, test_data_path)
+            train_records, val_records, _ = self._split_by_subject(
+                records, split_info=split_info
+            )
+        else:
+            train_records, val_records, test_records = self._split_by_subject(
+                records, split_info=split_info
+            )
 
         num_workers = getattr(self.config, "num_workers", 0)
         train_loader = DataLoader(

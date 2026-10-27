@@ -1,5 +1,7 @@
 {
   "seed": 36,
+  "protocol": "intra_dataset",
+  "train_dataset": "bidmc",
   "train_subjects": [
     "bidmc_01",
     "bidmc_02",
